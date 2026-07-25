@@ -250,6 +250,15 @@ boot_bootstrap32_ud_probe:
     movl $0, page_table_b+4(%eax)
 #endif
 
+    /* NMI has its own absent lower guard immediately below IST2. */
+    mov $__nmi_ist_guard_start, %eax
+    shr $9, %eax
+    and $0x7ff8, %eax
+    movl $0, page_table_a(%eax)
+    movl $0, page_table_a+4(%eax)
+    movl $0, page_table_b(%eax)
+    movl $0, page_table_b+4(%eax)
+
     /* The linker-owned page immediately below the ordinary CPL3 entry stack
        is absent in every live address space. */
     mov $__entry_stack_guard_start, %eax
@@ -451,6 +460,12 @@ df_ist_stack:
     .skip 16384
 .global df_ist_stack_top
 df_ist_stack_top:
+
+.section .nmi_ist.guard,"aw",@nobits
+.align 4096
+.global nmi_ist_guard
+nmi_ist_guard:
+    .skip 4096
 
 .section .nmi_ist.stack,"aw",@nobits
 .align 4096
@@ -700,6 +715,17 @@ isr2_cld:
     movabs $0x4b5445524d494e41, %rax
     cmp %rax, __nmi_ist_stack_end-128(%rip)
     jne 8f
+#ifdef LEANOS_NMI_PROBE
+    movabs $0x4f5244494e415259, %rax
+    cmp %rax, __entry_stack_start(%rip)
+    jne 8f
+    movabs $0x535441434b43414e, %rax
+    cmp %rax, __entry_stack_end-128(%rip)
+    jne 8f
+    movabs $0x52554e54494d454e, %rax
+    cmp %rax, nmi_runtime_canary(%rip)
+    jne 8f
+#endif
     cmpq $0x10, 32(%rbx)
     jne 6f
     cmpq $0x08, 8(%rbx)
@@ -865,13 +891,13 @@ isr8_cld:
 
 .section .rodata,"a",@progbits
 nmi_kernel_handling_record:
-    .ascii "LEANOS/17 NMI reason=non-maskable-interrupt vector=2 error=none ist=2 frame=rip,cs,rflags,rsp,ss origin=cpl0 prior=handling terminal=latched return=none\n"
+    .ascii "LEANOS/17 NMI reason=non-maskable-interrupt vector=2 error=none ist=2 frame=rip,cs,rflags,rsp,ss origin=cpl0 prior=handling subject=1 address-space=1 purpose=syscall canaries=ist2,ordinary,runtime terminal=latched return=none\n"
 nmi_kernel_handling_record_end:
 nmi_kernel_running_record:
-    .ascii "LEANOS/17 NMI reason=non-maskable-interrupt vector=2 error=none ist=2 frame=rip,cs,rflags,rsp,ss origin=cpl0 prior=running terminal=latched return=none\n"
+    .ascii "LEANOS/17 NMI reason=non-maskable-interrupt vector=2 error=none ist=2 frame=rip,cs,rflags,rsp,ss origin=cpl0 prior=running subject=1 address-space=1 purpose=kernel canaries=ist2,ordinary,runtime terminal=latched return=none\n"
 nmi_kernel_running_record_end:
 nmi_user_running_record:
-    .ascii "LEANOS/17 NMI reason=non-maskable-interrupt vector=2 error=none ist=2 frame=rip,cs,rflags,rsp,ss origin=cpl3 prior=running terminal=latched return=none\n"
+    .ascii "LEANOS/17 NMI reason=non-maskable-interrupt vector=2 error=none ist=2 frame=rip,cs,rflags,rsp,ss origin=cpl3 prior=running subject=1 address-space=1 purpose=user-spin canaries=ist2,ordinary,runtime terminal=latched return=none\n"
 nmi_user_running_record_end:
 nmi_failure_record:
     .ascii "LEANOS/17 NMI status=FAIL reason=terminal-frame-policy\n"
@@ -1476,6 +1502,10 @@ integer_fault_restore_peer:
 .section .user.a.text,"ax",@progbits
 .global user_a_entry
 user_a_entry:
+#ifdef LEANOS_NMI_PROBE
+1:  pause
+    jmp 1b
+#endif
 #ifdef LEANOS_FAULT_CONTAINMENT_SCENARIO
     jmp user_a_fault_instruction
 #endif

@@ -42,6 +42,7 @@ df_negative_iso_root="$build/iso-double-fault-guard-mapped"
 entry_overflow_iso_root="$build/iso-entry-stack-overflow"
 entry_adversarial_iso_root="$build/iso-entry-adversarial"
 nmi_iso_root="$build/iso-nmi"
+nmi_cpl3_iso_root="$build/iso-nmi-cpl3"
 bootstrap32_ud_iso_root="$build/iso-bootstrap32-ud"
 bootstrap64_nmi_iso_root="$build/iso-bootstrap64-nmi"
 # Direct-port-containment family (#130): one shared kernel object, one reviewed
@@ -94,7 +95,8 @@ mkdir -p "$iso_root/boot/grub" "$preemption_iso_root/boot/grub" \
   "$df_iso_root/boot/grub" \
   "$df_negative_iso_root/boot/grub" "$entry_overflow_iso_root/boot/grub" \
   "$entry_adversarial_iso_root/boot/grub" "$nmi_iso_root/boot/grub" \
-  "$bootstrap32_ud_iso_root/boot/grub" "$bootstrap64_nmi_iso_root/boot/grub"
+  "$nmi_cpl3_iso_root/boot/grub" "$bootstrap32_ud_iso_root/boot/grub" \
+  "$bootstrap64_nmi_iso_root/boot/grub"
 for probe in "${direct_port_probes[@]}"; do
   mkdir -p "$build/iso-direct-port-${probe}/boot/grub"
 done
@@ -292,6 +294,9 @@ cp scripts/entry-stack-extended-callgraph.tsv \
   -ffile-prefix-map="$repo_root"=. -g3 -DLEANOS_ENTRY_ADVERSARIAL=1 \
   -c boot/boot.S -o "$build/boot-entry-adversarial.o"
 "$cc" -m64 -ffreestanding -fdebug-prefix-map="$repo_root"=. \
+  -ffile-prefix-map="$repo_root"=. -g3 -DLEANOS_NMI_PROBE=1 \
+  -c boot/boot.S -o "$build/boot-nmi.o"
+"$cc" -m64 -ffreestanding -fdebug-prefix-map="$repo_root"=. \
   -ffile-prefix-map="$repo_root"=. -g3 -DLEANOS_BOOTSTRAP32_UD_PROBE=1 \
   -c boot/boot.S -o "$build/boot-bootstrap32-ud.o"
 "$cc" -m64 -ffreestanding -fdebug-prefix-map="$repo_root"=. \
@@ -438,7 +443,7 @@ for probe in "${integer_fault_probes[@]}"; do
 done
 ld -m elf_x86_64 -nostdlib --gc-sections --build-id=none \
   -T boot/linker.ld -Map "$build/leanos-nmi-prelink.map" \
-  -o "$build/leanos-nmi-prelink.elf" "$build/boot.o" \
+  -o "$build/leanos-nmi-prelink.elf" "$build/boot-nmi.o" \
   "$build/kernel-nmi.o" "$build/KernelTransition.o" "$build/Syscall.o" \
   "$build/IPCSyscall.o" "$build/Preemption.o" "$build/BootAllocation.o" \
   "$build/Interrupt.o" "$build/InterruptEntry.o" "$build/BlockingIPC.o" \
@@ -654,7 +659,7 @@ for probe in "${integer_fault_probes[@]}"; do
 done
 ld -m elf_x86_64 -nostdlib --gc-sections --build-id=none \
   -T boot/linker.ld -Map "$build/leanos-nmi.map" \
-  -o "$build/leanos-nmi.elf" "$build/boot.o" "$build/kernel-nmi.o" \
+  -o "$build/leanos-nmi.elf" "$build/boot-nmi.o" "$build/kernel-nmi.o" \
   "$build/KernelTransition.o" "$build/Syscall.o" "$build/IPCSyscall.o" \
   "$build/Preemption.o" "$build/BootAllocation.o" "$build/Interrupt.o" \
   "$build/InterruptEntry.o" "$build/BlockingIPC.o" \
@@ -1074,6 +1079,11 @@ for probe in "${integer_fault_probes[@]}"; do
   ./scripts/check-image-policy.sh "$build/leanos-${probe}.elf"
 done
 ./scripts/check-nmi-image-policy.sh "$build/leanos-nmi.elf"
+cp "$build/leanos-nmi.elf" "$build/leanos-nmi-cpl3.elf"
+cp "$build/leanos-nmi.map" "$build/leanos-nmi-cpl3.map"
+objdump -d --no-show-raw-insn "$build/leanos-nmi.elf" \
+  > "$build/nmi.disassembly.txt"
+cp "$build/nmi.disassembly.txt" "$build/nmi-cpl3.disassembly.txt"
 ./scripts/check-image-policy.sh "$build/leanos-bootstrap32-ud.elf"
 ./scripts/check-image-policy.sh "$build/leanos-bootstrap64-nmi.elf"
 ./scripts/check-early-probe-policy.py "$build/leanos-bootstrap32-ud.elf" \
@@ -1136,9 +1146,8 @@ while IFS=$'\t' read -r _id _runner _class _timeout _image elf_name \
     leanos-entry-stack-overflow.elf)
       manifest="scripts/direct-port-sites-entry-stack-overflow.tsv"
       ;;
-    leanos-nmi.elf)
+    leanos-nmi.elf|leanos-nmi-cpl3.elf)
       manifest="scripts/direct-port-sites-nmi.tsv"
-      direct_port_args=(--terminal-before-user)
       ;;
     leanos-bootstrap32-ud.elf)
       manifest="scripts/direct-port-sites-bootstrap32-ud.tsv"
@@ -1164,7 +1173,7 @@ while IFS=$'\t' read -r _id _runner _class _timeout _image elf_name \
     | sed "s/^/elf=$elf_name /" | tee -a "$direct_port_report"
   ((direct_port_images += 1))
 done < "$matrix"
-[[ "$direct_port_images" -eq 48 ]] || {
+[[ "$direct_port_images" -eq 49 ]] || {
   echo "error: direct-port evidence ELF count drifted: $direct_port_images" >&2
   exit 1
 }
@@ -1245,6 +1254,8 @@ cp "$build/leanos-entry-adversarial.elf" "$entry_adversarial_iso_root/boot/leano
 cp boot/grub.cfg "$entry_adversarial_iso_root/boot/grub/grub.cfg"
 cp "$build/leanos-nmi.elf" "$nmi_iso_root/boot/leanos.elf"
 cp boot/grub.cfg "$nmi_iso_root/boot/grub/grub.cfg"
+cp "$build/leanos-nmi-cpl3.elf" "$nmi_cpl3_iso_root/boot/leanos.elf"
+cp boot/grub-nmi-cpl3.cfg "$nmi_cpl3_iso_root/boot/grub/grub.cfg"
 cp "$build/leanos-bootstrap32-ud.elf" "$bootstrap32_ud_iso_root/boot/leanos.elf"
 cp boot/grub.cfg "$bootstrap32_ud_iso_root/boot/grub/grub.cfg"
 cp "$build/leanos-bootstrap64-nmi.elf" "$bootstrap64_nmi_iso_root/boot/leanos.elf"
@@ -1276,6 +1287,7 @@ cp "$build/SOURCE_REVISION" "$df_negative_iso_root/boot/SOURCE_REVISION"
 cp "$build/SOURCE_REVISION" "$entry_overflow_iso_root/boot/SOURCE_REVISION"
 cp "$build/SOURCE_REVISION" "$entry_adversarial_iso_root/boot/SOURCE_REVISION"
 cp "$build/SOURCE_REVISION" "$nmi_iso_root/boot/SOURCE_REVISION"
+cp "$build/SOURCE_REVISION" "$nmi_cpl3_iso_root/boot/SOURCE_REVISION"
 cp "$build/SOURCE_REVISION" "$bootstrap32_ud_iso_root/boot/SOURCE_REVISION"
 cp "$build/SOURCE_REVISION" "$bootstrap64_nmi_iso_root/boot/SOURCE_REVISION"
 for probe in "${direct_port_probes[@]}"; do
@@ -1358,6 +1370,10 @@ grub-mkrescue -d /usr/lib/grub/i386-pc \
   -volume_date uuid 2000010100000000 \
   -volume_date all_file_dates 2000010100000000 >/dev/null
 grub-mkrescue -d /usr/lib/grub/i386-pc \
+  -o "$build/leanos-${version}-x86_64-nmi-cpl3.iso" "$nmi_cpl3_iso_root" -- \
+  -volume_date uuid 2000010100000000 \
+  -volume_date all_file_dates 2000010100000000 >/dev/null
+grub-mkrescue -d /usr/lib/grub/i386-pc \
   -o "$build/leanos-${version}-x86_64-bootstrap32-ud.iso" \
   "$bootstrap32_ud_iso_root" -- -volume_date uuid 2000010100000000 \
   -volume_date all_file_dates 2000010100000000 >/dev/null
@@ -1424,6 +1440,8 @@ sha256sum "$build/leanos-${version}-x86_64.iso" \
   "$build/leanos-entry-adversarial.elf" \
   "$build/leanos-${version}-x86_64-nmi.iso" \
   "$build/leanos-nmi.elf" "$build/leanos-nmi.map" \
+  "$build/leanos-${version}-x86_64-nmi-cpl3.iso" \
+  "$build/leanos-nmi-cpl3.elf" "$build/leanos-nmi-cpl3.map" \
   "$build/leanos-${version}-x86_64-bootstrap32-ud.iso" \
   "$build/leanos-bootstrap32-ud.elf" "$build/leanos-bootstrap32-ud.map" \
   "$build/leanos-${version}-x86_64-bootstrap64-nmi.iso" \
