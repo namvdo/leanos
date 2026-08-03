@@ -141,6 +141,11 @@ guest cannot satisfy this fixture. These identity words are a finite QEMU
 mutation oracle, not evidence that the QTest fixture reconstructs the kernel's
 authoritative allocator state or refines the Lean projection. This controlled
 extra function is never admitted to the production topology or its manifest.
+Because this DMA oracle needs TCG's virtual clock to run, its CPU is not paused.
+The harness installs an inert 64 KiB BIOS whose reset vector halts in a loop,
+isolating qtest from firmware enumeration while bounded qtest response waits
+guard each access before the harness takes ownership of the EDU BAR and Command
+register.
 
 `scripts/run-dma-unknown-device.sh` supplies the first guest-level controlled
 negative after that canary oracle. It reuses the normal production image and
@@ -258,6 +263,12 @@ publishes the diagnostic snapshot, latches a typed DMA fatal record, and is
 absorbed by every later authoritative successor operation. This integration
 does not fork `DMAQuarantine.RuntimeState` or its parallel memory projection
 into the composite runtime.
+
+The later [static IOMMU confinement model](iommu-confinement.md) preserves this
+deny-all result unchanged and adds a separate assigned-device authority
+projection. This q35 validator still rejects every assignment; its
+integrity-only `DeviceContract` is not retroactively treated as a
+confidentiality or hardware-translation assumption.
 
 Issue #105 remains the owner of canonical decoding and the global fixed-width
 composite encoding. The finite q35 scalar transport is only the allocation-free

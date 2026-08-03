@@ -17,6 +17,7 @@ import select
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 
@@ -53,6 +54,11 @@ QTEST_RESPONSE_TIMEOUT_SECONDS = 5
 
 class QTest:
     def __init__(self, executable: str) -> None:
+        self.firmware = tempfile.NamedTemporaryFile(prefix="leanos-edu-", suffix=".bin")
+        firmware = bytearray(b"\xff" * 65536)
+        firmware[0xFFF0:0xFFF3] = b"\xf4\xeb\xfd"  # hlt; jmp back to hlt
+        self.firmware.write(firmware)
+        self.firmware.flush()
         self.process = subprocess.Popen(
             [
                 executable,
@@ -64,6 +70,7 @@ class QTest:
                 "-display", "none",
                 "-monitor", "none",
                 "-serial", "none",
+                "-bios", self.firmware.name,
                 "-no-reboot",
                 "-no-shutdown",
                 "-nic", "none",
@@ -95,6 +102,7 @@ class QTest:
                 f"QEMU exited unexpectedly with {self.process.returncode}: "
                 f"{stderr.strip()}"
             )
+        self.firmware.close()
 
     def command(self, request: str) -> str:
         if self.process.stdin is None or self.process.stdout is None:
