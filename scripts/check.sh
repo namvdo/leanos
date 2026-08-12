@@ -14,6 +14,8 @@ lake build leanos-vtd-plan
 ./scripts/test-q35-platform.sh
 ./scripts/test-run-dma-unknown-device.sh
 
+./scripts/test-qemu-wasm-manifest.sh
+
 ./scripts/check-dma-quarantine-corpus.sh
 
 ./scripts/test-capability-boundaries.sh

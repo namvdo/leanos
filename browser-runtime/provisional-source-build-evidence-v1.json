@@ -1,0 +1,51 @@
+{
+  "schema": "leanos-qemu-wasm-source-build-evidence/v1",
+  "issue": 194,
+  "acceptance_ready": false,
+  "manifest_sha256": "218773eb645ba1a0f23783c98ede52e1307add7272f20b544560f5336779bfae",
+  "container_image_id": "sha256:17a3aa166d639f03dc7eb864cf69991593572dd07d5683a28fbea270ef7c2cac",
+  "host": {
+    "os": "Linux",
+    "architecture": "x86_64",
+    "container_platform": "linux/amd64"
+  },
+  "clean_builds": 2,
+  "comparison": "byte-identical",
+  "outputs": [
+    {
+      "path": "qemu-system-x86_64.js",
+      "sha256": "0e5f575f9bcb1a5378951cf8811d03012a8b8301413cfd50eae39024636f8c82",
+      "size": 230108
+    },
+    {
+      "path": "qemu-system-x86_64.wasm",
+      "sha256": "1b3dfa690b76394059962d6826ddc79db908dab942a218711ccbf6622783e7da",
+      "size": 41429937
+    },
+    {
+      "path": "qemu-system-x86_64.worker.js",
+      "sha256": "8efab02a9cb5ee63ced22e9853bce74cbb895d15a5fb3d5139fef855c50f62ea",
+      "size": 6000
+    },
+    {
+      "path": "TOOLCHAIN.txt",
+      "sha256": "fd7907b20a6c5f665807f239f84d91400ef2c390ec9a66bf8dcd15ec2c450255",
+      "size": 8649
+    },
+    {
+      "path": "BUILD_COMMANDS.txt",
+      "sha256": "2b25165de608ae14189d0e1666bdc34f332f0deed826b60ae81c4ac2dad98e29",
+      "size": 1435
+    },
+    {
+      "path": "PATCHES.json",
+      "sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+      "size": 3
+    },
+    {
+      "path": "SHA256SUMS",
+      "sha256": "d1f359dad877f3b0cb5cf044b32ec495c1e8467eb2a67bb56cb490b1cf52eac6",
+      "size": 517
+    }
+  ]
+}
