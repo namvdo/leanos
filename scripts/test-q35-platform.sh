@@ -10,6 +10,32 @@ leanos_q35_command command qemu-system-x86_64 128 build/evidence/serial.log \
   build/boot/leanos.iso
 leanos_validate_q35_command command
 
+assigned_edu=()
+leanos_q35_assigned_edu_command assigned_edu qemu-system-x86_64 128 \
+  build/evidence/assigned-edu.serial.log build/boot/leanos.iso
+leanos_validate_q35_assigned_edu_command assigned_edu
+[[ "$LEANOS_Q35_ASSIGNED_EDU_TOPOLOGY_VERSION" != "$LEANOS_Q35_TOPOLOGY_VERSION" ]] || {
+  echo "error: assigned-EDU construction reused the production topology version" >&2
+  exit 1
+}
+if leanos_validate_q35_command assigned_edu 2>/dev/null; then
+  echo "error: production q35 platform accepted the assigned EDU function" >&2
+  exit 1
+fi
+
+negative=("${assigned_edu[@]}")
+negative[-1]=edu,bus=pcie.0,addr=0x3
+if leanos_validate_q35_assigned_edu_command negative 2>/dev/null; then
+  echo "error: assigned-EDU platform accepted a drifted BDF" >&2
+  exit 1
+fi
+
+negative=("${assigned_edu[@]}" -device edu,bus=pcie.0,addr=0x2)
+if leanos_validate_q35_assigned_edu_command negative 2>/dev/null; then
+  echo "error: assigned-EDU platform accepted a duplicate function" >&2
+  exit 1
+fi
+
 negative=("${command[@]}")
 for index in "${!negative[@]}"; do
   if [[ "${negative[$index]}" == -nodefaults ]]; then
@@ -101,7 +127,6 @@ for runner in \
   scripts/run-bootstrap32-ud.sh \
   scripts/run-bootstrap64-nmi.sh \
   scripts/run-double-fault.sh \
-  scripts/run-dma-unknown-device.sh \
   scripts/run-entry-stack-overflow.sh \
   scripts/run-extended-state-peer-pke.sh \
   scripts/run-fault-integrity.sh \
@@ -116,5 +141,12 @@ do
       exit 1
     }
 done
+
+grep -Eq 'source .*q35-platform\.sh' scripts/run-dma-unknown-device.sh &&
+  grep -Eq 'leanos_q35_assigned_edu_command command ' \
+    scripts/run-dma-unknown-device.sh || {
+  echo "error: assigned-EDU boot negative bypasses its versioned platform builder" >&2
+  exit 1
+}
 
 echo "Explicit q35 platform positive and controlled-negative checks passed"
