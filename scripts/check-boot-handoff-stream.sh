@@ -2,6 +2,7 @@
 set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
+cc="${LEANOS_CC:-gcc}"
 mode="${1:-ordinary}"
 id="${LEANOS_HOSTED_BOUNDARY_ID:-freestanding-stream}"
 manifest=scripts/hosted-generated-boundaries.tsv
@@ -299,13 +300,13 @@ lake env leanc "${cflags[@]}" -I"$prefix/include" \
   -c .lake/build/ir/LeanOS/BootMemoryMapStreaming.c -o "$build/stream.o"
 lake env leanc "${cflags[@]}" -I"$prefix/include" \
   -c .lake/build/ir/LeanOS/BootMemoryMapStreamAuthority.c -o "$build/authority.o"
-cc "${cflags[@]}" -c tests/boot-handoff-stream-freestanding.c -o "$build/test.o"
-cc -m64 -std=c11 -O2 -Wall -Wextra -Werror \
+"$cc" "${cflags[@]}" -c tests/boot-handoff-stream-freestanding.c -o "$build/test.o"
+"$cc" -m64 -std=c11 -O2 -Wall -Wextra -Werror \
   -DLEANOS_HOSTED_REPLAY=1 \
   -c tests/boot-handoff-stream-freestanding.c -o "$build/host.o"
-cc -m64 -nostdlib -static -no-pie -Wl,--gc-sections -Wl,-e,_start \
+"$cc" -m64 -nostdlib -static -no-pie -Wl,--gc-sections -Wl,-e,_start \
   "$build/test.o" "$build/stream.o" "$build/authority.o" -o "$build/stream.elf"
-cc -m64 -no-pie -Wl,--gc-sections \
+"$cc" -m64 -no-pie -Wl,--gc-sections \
   "$build/host.o" "$build/stream.o" "$build/authority.o" -o "$build/host"
 
 undefined="$(nm -u "$build/stream.elf")"
@@ -344,7 +345,7 @@ done
 # hide behind a non-exported name in this final focused artifact.
 while read -r text_symbol; do
   case "$text_symbol" in
-    _start|check_stream|decode|decode_entry_count|decode_extent|decode_v5_extent|expect_decode_error|step_query|\
+    _start|check_stream|decode|decode_entry_count|decode_extent|decode_v5_extent|expect_decode_error|memcpy|memset|step_query|\
 leanos_boot_handoff_stream_init|\
 leanos_boot_handoff_stream_step|\
 leanos_boot_decode_init|leanos_boot_decode_step|\

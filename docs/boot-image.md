@@ -93,6 +93,18 @@ The reference environment is Ubuntu 24.04 (x86-64) with Lean 4.32.0 from
 (`qemu-system-x86=1:8.2.2+ds-0ubuntu1.18`), coreutils
 (`coreutils=9.4-3ubuntu6.2`), and QEMU's distributed SeaBIOS 1.16.3 firmware.
 The scripts name the Ubuntu package pins in actionable missing-tool diagnostics.
+
+The independent Clang lane retains `-mgeneral-regs-only` and requests Lean's
+required source-width floating-point evaluation contract. Clang 18 warns that
+this evaluation method is unsupported on the resulting no-SSE target, so only
+that `-Wpragmas` diagnostic remains non-fatal; the warning stays visible and all
+source warnings remain errors. No floating-point operation is permitted by the
+general-register-only target. The lane also uses `-fno-jump-tables`: the final
+ELF entry-stack gate deliberately rejects indirect control-flow edges because
+their possible targets cannot be bounded by its reviewed static call graph, and
+Clang otherwise lowers the finite generated entry classifier through a jump
+table. This preserves the fail-closed stack analysis rather than allowlisting
+an optimizer-specific indirect edge.
 These pins identify the build inputs. `build-image.sh` uses BIOS-only GRUB
 output, a fixed ISO UUID and file dates, no linker build ID, and normalized
 debug paths. `./scripts/test-reproducible-build.sh` performs two clean builds
@@ -100,6 +112,26 @@ and requires byte-identical ISO, ELF, symbol map, and source-revision files.
 The experiment is run by both release CI and local validation. It measures
 same-revision rebuilding in the pinned reference environment; it does not claim
 that arbitrary host distributions or tool versions produce identical bytes.
+
+Pull-request CI also builds and boots the canonical image with the pinned
+Ubuntu 24.04 `clang-18=1:18.1.3-1ubuntu1` package. That lane sets
+`LEANOS_CC=clang-18`, verifies nested compiler selection, performs two clean
+image builds with the existing byte-reproducibility gate, runs the same
+final-ELF policy gates, and requires the canonical guest's complete
+generated-oracle protocol plus independent debug-exit status. GCC and Clang
+outputs are not compared: each compiler's same-revision rebuild is compared
+only with itself. The lane
+preserves the compiler command, reviewed security flags, ELF, map,
+disassembly/stack evidence, serial transcript, and QEMU command log. GNU
+binutils, GRUB, SeaBIOS, and QEMU remain shared with the reference lane, so
+this is independent C-front-end integration evidence—not verified compilation,
+a semantic-equivalence proof, or a second release toolchain.
+
+The final-ELF direct-port gate continues to pin every reviewed symbol, opcode,
+operand, owner, source invocation, and call-graph edge. Its manifest uses the
+GCC reference offsets; the checker additionally recognizes only the enumerated
+Clang 18 offsets produced by the pinned lane. An unknown offset, extra site,
+changed instruction, different owner, or new caller still fails closed.
 
 ## Experimental releases
 

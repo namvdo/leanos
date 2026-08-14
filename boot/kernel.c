@@ -2,6 +2,13 @@
 #include "corpus.h"
 #include "generated-boundary-abi.h"
 #include "leanos/composite-dispatcher.h"
+
+/* GCC's noipa also blocks interprocedural transformations beyond noinline.
+   Clang has no noipa spelling; optnone is the reviewed stronger boundary for
+   this independent compiler lane while the shared GNU linker remains in use. */
+#if defined(__clang__)
+#define noipa optnone
+#endif
 #if defined(LEANOS_BOOT_PAGE_PLAN_HEADER)
 #include LEANOS_BOOT_PAGE_PLAN_HEADER
 #elif defined(LEANOS_DF_MAP_GUARD)
@@ -383,7 +390,7 @@ static uint64_t frame_budget_user_page = UINT64_MAX;
    This is an attestation, not a second mutable scheduler/lifecycle projection. */
 static uint64_t fault_dispatch_attestation;
 #endif
-static void finish(uint8_t value);
+static __attribute__((noreturn)) void finish(uint8_t value);
 static __attribute__((noreturn)) void fail(const char *reason);
 static void serial_puts(const char *text);
 static void serial_putc(char value);
@@ -687,8 +694,8 @@ static uint64_t runtime_mapping_leaf(uint64_t *frame) {
    every kernel-owned phase; an unknown phase is never accepted.
    Accessed/dirty bits are ignored only by the caller's ordinary x86
    comparison, just as for immutable leaves. */
-static int checked_runtime_leaf(unsigned space, uint64_t page,
-                                uint64_t *expected) {
+static __attribute__((noinline)) int checked_runtime_leaf(
+    unsigned space, uint64_t page, uint64_t *expected) {
     if (page != RUNTIME_MAPPING_PAGE || (space != 1 && space != 2))
         return 1;
     if (space == 1) {
@@ -1956,6 +1963,22 @@ static struct copied_boot_handoff copy_boot_handoff(
 
 struct boot_decode_state { uint64_t word[41]; };
 
+static void zero_boot_decode_state(struct boot_decode_state *state) {
+    volatile uint64_t *words = state->word;
+    for (unsigned query = 0; query < 41; ++query)
+        words[query] = 0;
+}
+
+/* Keep fixed-width decoder-state transport explicit in the freestanding
+   kernel. Clang may otherwise lower these aggregate copies to a hosted
+   memcpy call, which is not part of the boot image's runtime contract. */
+static void copy_boot_decode_state(struct boot_decode_state *destination,
+                                   const struct boot_decode_state *source) {
+    volatile uint64_t *words = destination->word;
+    for (unsigned query = 0; query < 41; ++query)
+        words[query] = source->word[query];
+}
+
 #define BOOT_MANIFEST_ARGS(info_address, total) \
     0, 0x100000u, \
     (uint64_t)__boot_image_start, \
@@ -2025,7 +2048,7 @@ static struct boot_decode_state decode_boot_projection(
                 state.word[32], state.word[33], state.word[34], state.word[35],
                 state.word[36], state.word[37], state.word[38],
                 info_address, offset, chunk, terminal, query);
-        state = next;
+        copy_boot_decode_state(&state, &next);
         if (state.word[2] != 0) break;
         if (state.word[19] == 1) {
             if (state.word[11] == 0 || state.word[11] > 256)
@@ -2096,7 +2119,7 @@ static struct boot_decode_state decode_boot_candidate_authority(
                 state.word[32], state.word[33], state.word[34], state.word[35],
                 state.word[36], state.word[37], state.word[38],
                 info_address, offset, chunk, terminal, query);
-        state = next;
+        copy_boot_decode_state(&state, &next);
         if (state.word[2] != 0) break;
     }
     if (state.word[1] != 1 || state.word[2] != 0 ||
@@ -2212,7 +2235,8 @@ static void boot_allocate(uint32_t magic, uint32_t info_address) {
        to nominate the frame consumed by production. */
     uint64_t selected = 4096;
     uint64_t selected_manifest = 0;
-    struct boot_decode_state selected_authority = {0};
+    struct boot_decode_state selected_authority;
+    zero_boot_decode_state(&selected_authority);
 #ifdef LEANOS_FRAME_BUDGET_SCENARIO
     uint64_t next_selected = 4096;
 #endif
@@ -2229,7 +2253,7 @@ static void boot_allocate(uint32_t magic, uint32_t info_address) {
         if (exact_candidate >= 4096) continue;
         if (selected >= 4096) {
             selected = exact_candidate;
-            selected_authority = candidate_authority;
+            copy_boot_decode_state(&selected_authority, &candidate_authority);
             selected_manifest = candidate_manifest;
 #ifndef LEANOS_FRAME_BUDGET_SCENARIO
             break;
@@ -3802,9 +3826,9 @@ static uint64_t context_descriptor(uint64_t owner, uint64_t stack_pointer) {
     return owner | (stack_marker(stack_pointer) << 8);
 }
 
-static void check_original_frame(const uint64_t *frame, uint64_t original_rip,
-                                 uint64_t original_flags, uint64_t original_rsp,
-                                 uint64_t owner) {
+static __attribute__((noinline)) void check_original_frame(
+    const uint64_t *frame, uint64_t original_rip, uint64_t original_flags,
+    uint64_t original_rsp, uint64_t owner) {
     if (frame[15] != original_rip || frame[17] != original_flags ||
         frame[18] != original_rsp ||
         stack_marker(original_rsp) != owner)
@@ -3817,7 +3841,8 @@ static int initial_b_frame_valid(const volatile uint64_t *frame) {
         frame[19] == 0x1b;
 }
 
-static void check_initial_b_frame(const volatile uint64_t *frame) {
+static __attribute__((noinline)) void check_initial_b_frame(
+    const volatile uint64_t *frame) {
     if (!initial_b_frame_valid(frame)) fail("initial-context-frame");
 }
 
