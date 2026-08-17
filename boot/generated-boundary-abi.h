@@ -11,6 +11,17 @@ uint64_t leanos_authorize_page_fault_snapshot(
 uint64_t leanos_validate_vtd_activation(
     uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
     uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t leanos_validate_assigned_edu_projection(
+    uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+    uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+    uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+    uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+    uint64_t, uint64_t);
+uint64_t leanos_validate_assigned_edu_transfer(
+    uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+uint64_t leanos_validate_assigned_edu_fault(
+    uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
+    uint64_t, uint64_t, uint64_t);
 uint64_t leanos_page_fault_dispatch_transition(
     uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,
     uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t,

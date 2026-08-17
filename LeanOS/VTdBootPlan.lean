@@ -617,6 +617,207 @@ def validateActivationExport (version topology unitVersion capability extendedCa
   validateActivation version topology unitVersion capability extendedCapability
     globalStatus faultStatus rootTableAddress expectedRootTableAddress journal
 
+/-! ## Assigned-EDU authority/control boundary
+
+The assigned image must not reconstruct device authority from C literals.  This
+allocation-free scalar boundary accepts only the complete reviewed projection:
+the assigned construction revision, assignment/domain identity, platform
+requester, linker-owned table/buffer layout, and both directionally restricted
+mappings.  The exported code intentionally compares only `UInt64` values so it
+does not require a Lean module initializer in the freestanding image. -/
+
+def assignedProjectionVersion : UInt64 := 1
+def assignedEDUTopologyVersion : UInt64 := 0x0001000800020003
+
+/-- The one reviewed assignment and its directionally restricted mappings.
+This state is shared by table generation and the exported transfer-admission
+boundary so neither path reconstructs authority from caller-supplied words. -/
+def assignedEDUState : IOMMU.State :=
+  let readGranted := IOMMU.gate IOMMU.assignedState (.grant IOMMU.readOnlyGrant)
+  (IOMMU.gate readGranted.state (.grant IOMMU.writeOnlyGrant)).state
+
+def validateAssignedEDUProjection
+    (version topology device source assignmentGeneration domain domainGeneration
+      owner requester secondLevelRootFrame secondLevelDirectoryFrame
+      secondLevelTableFrame readBufferFrame writeBufferFrame readIova readLength
+      readFrame readFrameGeneration readFrameOffset readPermission writeIova
+      writeLength writeFrame writeFrameGeneration writeFrameOffset writePermission :
+      UInt64) : UInt64 :=
+  if version != assignedProjectionVersion then 1
+  else if topology != assignedEDUTopologyVersion then 2
+  else if device != 0 || source != 0 || assignmentGeneration != 1 ||
+      domain != 0 || domainGeneration != 1 || owner != 0 || requester != 16 then 3
+  else if secondLevelRootFrame = 0 ||
+      secondLevelDirectoryFrame != secondLevelRootFrame + 1 ||
+      secondLevelTableFrame != secondLevelDirectoryFrame + 1 ||
+      readBufferFrame != secondLevelTableFrame + 2 ||
+      writeBufferFrame != readBufferFrame + 1 then 4
+  else if readIova != 0 || readLength != 16 || readFrame != 0 ||
+      readFrameGeneration != 1 || readFrameOffset != 0 || readPermission != 1 then 5
+  else if writeIova != 16 || writeLength != 16 || writeFrame != readFrame ||
+      writeFrameGeneration != readFrameGeneration || writeFrameOffset != 16 ||
+      writePermission != 2 then 6
+  else 0
+
+@[export leanos_validate_assigned_edu_projection]
+def validateAssignedEDUProjectionExport
+    (version topology device source assignmentGeneration domain domainGeneration
+      owner requester secondLevelRootFrame secondLevelDirectoryFrame
+      secondLevelTableFrame readBufferFrame writeBufferFrame readIova readLength
+      readFrame readFrameGeneration readFrameOffset readPermission writeIova
+      writeLength writeFrame writeFrameGeneration writeFrameOffset writePermission :
+      UInt64) : UInt64 :=
+  validateAssignedEDUProjection version topology device source assignmentGeneration
+    domain domainGeneration owner requester secondLevelRootFrame
+    secondLevelDirectoryFrame secondLevelTableFrame readBufferFrame writeBufferFrame
+    readIova readLength readFrame readFrameGeneration readFrameOffset readPermission
+    writeIova writeLength writeFrame writeFrameGeneration writeFrameOffset writePermission
+
+/-- Stable scalar result for the assigned image's reviewed transfer requests.
+Direction 1 is a device read from guest memory; direction 2 is a device write.
+The request contains no domain, owner, mapping, or physical-frame authority. -/
+def validateAssignedEDUTransfer
+    (version source assignmentGeneration iova length direction : UInt64) : UInt64 :=
+  if version != assignedProjectionVersion then 1
+  else
+    let request : IOMMU.TransferRequest :=
+      ⟨source.toNat, assignmentGeneration.toNat, iova.toNat, length.toNat⟩
+    if direction == 1 then
+      match IOMMU.translate assignedEDUState request .read with
+      | .ok _ => 0
+      | .error .staleAssignment => 3
+      | .error .invalidRange => 4
+      | .error .permissionDenied => 5
+      | .error .staleFrame => 6
+      | .error _ => 7
+    else if direction == 2 then
+      match IOMMU.translate assignedEDUState request .write with
+      | .ok _ => 0
+      | .error .staleAssignment => 3
+      | .error .invalidRange => 4
+      | .error .permissionDenied => 5
+      | .error .staleFrame => 6
+      | .error _ => 7
+    else 2
+
+/-- Allocation-free implementation of the assigned-EDU transfer boundary.
+The branch structure is the scalar projection of `IOMMU.translate` over
+`assignedEDUState`: source 0 at generation 1 owns a read-only `[0, 16)`
+mapping and a write-only `[16, 32)` mapping.  Keeping the exported wrapper on
+fixed-width words prevents the freestanding image from acquiring Lean runtime
+or imported model dependencies; the model-facing definition above remains the
+independent specification used by the executable checks below. -/
+def validateAssignedEDUTransferScalar
+    (version source assignmentGeneration iova length direction : UInt64) : UInt64 :=
+  if version != assignedProjectionVersion then 1
+  else if direction != 1 && direction != 2 then 2
+  else if source ≥ 8 || length = 0 || iova > 4096 || length > 4096 - iova then 4
+  else if source != 0 || assignmentGeneration != 1 then 3
+  else if iova ≤ 16 && length ≤ 16 - iova then
+    if direction == 1 then 0 else 5
+  else if 16 ≤ iova && iova ≤ 32 && length ≤ 32 - iova then
+    if direction == 2 then 0 else 5
+  else 4
+
+@[export leanos_validate_assigned_edu_transfer]
+def validateAssignedEDUTransferExport
+    (version source assignmentGeneration iova length direction : UInt64) : UInt64 :=
+  validateAssignedEDUTransferScalar version source assignmentGeneration iova length direction
+
+/-- Bind the one-record VT-d fault observation to the current reviewed
+assigned-EDU authority. Legacy FRCD carries requester and access direction but
+not domain or assignment generation, so those current-state fields are checked
+alongside the exact record. QEMU 8.2.2 records the unavailable PASID field as
+all ones for this non-PASID request, and the pinned exact record retains that
+emulator-visible boundary instead of silently masking it. -/
+def validateAssignedEDUFault
+    (version source domain assignmentGeneration iova direction faultStatus
+      faultLow faultHigh : UInt64) : UInt64 :=
+  if version != assignedProjectionVersion then 1
+  else if direction != 1 && direction != 2 then 2
+  else if source != 0 || domain != 0 || assignmentGeneration != 1 then 3
+  else if faultStatus != 2 then 4
+  else if direction == 1 && iova == 4096 then
+    if faultLow != iova then 5
+    else if faultHigh != 0xc0ffff0600000010 then 6
+    else 0
+  else if direction == 2 && iova == 0 then
+    if faultLow != iova then 5
+    else if faultHigh != 0x80ffff0500000010 then 6
+    else 0
+  else if direction == 1 && iova == 8192 then
+    if faultLow != iova then 5
+    else if faultHigh != 0xc0ffff0600000010 then 6
+    else 0
+  else 4
+
+@[export leanos_validate_assigned_edu_fault]
+def validateAssignedEDUFaultExport
+    (version source domain assignmentGeneration iova direction faultStatus
+      faultLow faultHigh : UInt64) : UInt64 :=
+  validateAssignedEDUFault version source domain assignmentGeneration iova direction
+    faultStatus faultLow faultHigh
+
+example : validateAssignedEDUTransfer 1 0 1 0 16 1 = 0 := by native_decide
+example : validateAssignedEDUTransfer 1 0 1 16 16 2 = 0 := by native_decide
+example : validateAssignedEDUTransfer 1 0 1 0 16 2 = 5 := by native_decide
+example : validateAssignedEDUTransfer 1 0 1 16 16 1 = 5 := by native_decide
+example : validateAssignedEDUTransfer 1 0 1 8 16 1 = 4 := by native_decide
+example : validateAssignedEDUTransfer 1 1 1 0 16 1 = 3 := by native_decide
+
+/-- The allocation-free exported adapter refines the authoritative IOMMU
+model on every transfer in the fixed assigned-EDU scenario: both authorized
+directions and the reviewed wrong-direction, boundary-crossing, and
+wrong-source denials. This is deliberately a bounded-scenario theorem, not a
+claim about arbitrary assignments or devices. -/
+theorem assignedEDUTransferScalar_refines_authoritative_scenario :
+    validateAssignedEDUTransferScalar 1 0 1 0 16 1 =
+        validateAssignedEDUTransfer 1 0 1 0 16 1 ∧
+    validateAssignedEDUTransferScalar 1 0 1 16 16 2 =
+        validateAssignedEDUTransfer 1 0 1 16 16 2 ∧
+    validateAssignedEDUTransferScalar 1 0 1 0 16 2 =
+        validateAssignedEDUTransfer 1 0 1 0 16 2 ∧
+    validateAssignedEDUTransferScalar 1 0 1 16 16 1 =
+        validateAssignedEDUTransfer 1 0 1 16 16 1 ∧
+    validateAssignedEDUTransferScalar 1 0 1 8 16 1 =
+        validateAssignedEDUTransfer 1 0 1 8 16 1 ∧
+    validateAssignedEDUTransferScalar 1 1 1 0 16 1 =
+        validateAssignedEDUTransfer 1 1 1 0 16 1 := by
+  native_decide
+
+example : validateAssignedEDUFault
+    1 0 0 1 4096 1 2 4096 0xc0ffff0600000010 = 0 := by native_decide
+example : validateAssignedEDUFault
+    1 0 0 1 0 2 2 0 0x80ffff0500000010 = 0 := by native_decide
+example : validateAssignedEDUFault
+    1 0 0 1 8192 1 2 8192 0xc0ffff0600000010 = 0 := by native_decide
+example : validateAssignedEDUFault
+    1 0 0 1 4096 1 2 4096 0xc000000500000010 = 6 := by native_decide
+example : validateAssignedEDUFault
+    0 0 0 1 4096 1 2 4096 0xc0ffff0600000010 = 1 := by native_decide
+example : validateAssignedEDUFault
+    1 0 0 1 4096 3 2 4096 0xc0ffff0600000010 = 2 := by native_decide
+example : validateAssignedEDUFault
+    1 1 0 1 4096 1 2 4096 0xc0ffff0600000010 = 3 := by native_decide
+example : validateAssignedEDUFault
+    1 0 1 1 4096 1 2 4096 0xc0ffff0600000010 = 3 := by native_decide
+example : validateAssignedEDUFault
+    1 0 0 2 4096 1 2 4096 0xc0ffff0600000010 = 3 := by native_decide
+example : validateAssignedEDUFault
+    1 0 0 1 0 1 2 4096 0xc0ffff0600000010 = 4 := by native_decide
+example : validateAssignedEDUFault
+    1 0 0 1 4096 1 0 4096 0xc0ffff0600000010 = 4 := by native_decide
+example : validateAssignedEDUFault
+    1 0 0 1 4096 1 2 0 0xc0ffff0600000010 = 5 := by native_decide
+
+example : validateAssignedEDUProjection
+    1 0x0001000800020003 0 0 1 0 1 0 16
+    3 4 5 7 8 0 16 0 1 0 1 16 16 0 1 16 2 = 0 := by native_decide
+
+example : validateAssignedEDUProjection
+    1 0x0001000800020003 0 0 1 0 1 0 16
+    3 4 5 7 8 0 16 0 1 0 3 16 16 0 1 16 2 = 5 := by native_decide
+
 theorem validateActivation_deterministic (version topology unitVersion capability
     extendedCapability globalStatus faultStatus rootTableAddress expectedRootTableAddress
     journal : UInt64) first second

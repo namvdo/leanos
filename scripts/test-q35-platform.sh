@@ -149,4 +149,31 @@ grep -Eq 'source .*q35-platform\.sh' scripts/run-dma-unknown-device.sh &&
   exit 1
 }
 
+grep -Eq 'source .*q35-platform\.sh' scripts/run-assigned-edu.sh &&
+  grep -Eq 'leanos_q35_assigned_edu_command command ' \
+    scripts/run-assigned-edu.sh &&
+  grep -Fq 'VTD-FAULT requester=16 domain=0 generation=1 direction=read' \
+    scripts/run-assigned-edu.sh || {
+  echo "error: assigned-EDU positive bypasses its versioned platform builder" >&2
+  exit 1
+}
+
+grep -Eq 'source .*q35-platform\.sh' scripts/run-assigned-edu-negatives.sh &&
+  grep -Eq 'leanos_q35_assigned_edu_command command ' \
+    scripts/run-assigned-edu-negatives.sh || {
+  echo "error: assigned-EDU negatives bypass their versioned platform builder" >&2
+  exit 1
+}
+
+grep -Fq './scripts/run-assigned-edu-negatives.sh' .github/workflows/ci.yml &&
+  grep -Fq 'build/boot/assigned-edu-*.serial.log' .github/workflows/ci.yml &&
+  grep -Fq 'build/boot/leanos-0.1.0-x86_64-assigned-edu.iso' .github/workflows/ci.yml &&
+  grep -Fq 'build/boot/leanos-assigned-edu.elf' .github/workflows/ci.yml &&
+  grep -Fq 'build/boot/leanos-assigned-edu.map' .github/workflows/ci.yml &&
+  grep -Fq 'build/boot/boot-page-plan-assigned-edu.h' .github/workflows/ci.yml &&
+  grep -Fq 'build/boot/boot-page-plan-assigned-edu.final.h' .github/workflows/ci.yml || {
+  echo "error: mandatory CI does not run and retain complete assigned-EDU evidence" >&2
+  exit 1
+}
+
 echo "Explicit q35 platform positive and controlled-negative checks passed"

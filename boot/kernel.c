@@ -23,6 +23,7 @@
 #define DEBUG_EXIT 0xf4u
 #define PCI_CONFIG_ADDRESS 0xcf8u
 #define PCI_CONFIG_DATA 0xcfcu
+#define PCI_COMMAND_MEMORY (1u << 1)
 #define PCI_COMMAND_BUS_MASTER (1u << 2)
 #define PCI_COMMAND_MODEL_MASK 0x07ffu
 
@@ -213,7 +214,12 @@ extern uint64_t page_directory_a[], page_table_a[];
 extern uint64_t page_map_level_4_b[], page_directory_pointer_b[];
 extern uint64_t page_directory_b[], page_table_b[];
 extern char __vtd_mmio_window_start[], __vtd_mmio_window_end[];
+extern char __edu_mmio_window_start[], __edu_mmio_window_end[];
 extern uint64_t vtd_root_table[], vtd_context_table[];
+extern uint64_t vtd_second_level_root[], vtd_second_level_directory[];
+extern uint64_t vtd_second_level_table[];
+extern uint64_t vtd_assigned_guard_before[], vtd_assigned_read_buffer[];
+extern uint64_t vtd_assigned_write_buffer[], vtd_assigned_guard_after[];
 
 #define MULTIBOOT2_RUNTIME_MAGIC 0x36d76289u
 #define BOOT_ACCESSIBLE_LIMIT (16u * 1024u * 1024u)
@@ -232,6 +238,15 @@ extern uint64_t vtd_root_table[], vtd_context_table[];
 #define PTE_GLOBAL (1ull << 8)
 #define PTE_NX (1ull << 63)
 #define PTE_ADDRESS 0x000ffffffffff000ull
+
+/* boot.S consumes this link-visible constant before entering long mode so the
+   dedicated image, and only that image, installs the generated EDU BAR leaf. */
+#if defined(LEANOS_ASSIGNED_EDU_SCENARIO) && \
+    !defined(LEANOS_ASSIGNED_EDU_OMIT_MMIO_MAPPING_FIXTURE)
+const uint32_t leanos_assigned_edu_enabled = 1;
+#else
+const uint32_t leanos_assigned_edu_enabled = 0;
+#endif
 
 struct __attribute__((packed)) mb2_tag { uint32_t type, size; };
 struct __attribute__((packed)) mb2_mmap_tag {
@@ -393,7 +408,7 @@ static uint64_t fault_dispatch_attestation;
 static __attribute__((noreturn)) void finish(uint8_t value);
 static __attribute__((noreturn)) void fail(const char *reason);
 static void serial_puts(const char *text);
-static void serial_putc(char value);
+static __attribute__((noinline)) void serial_putc(char value);
 static void serial_u64(uint64_t value);
 #ifdef LEANOS_FAULT_CONTAINMENT_SCENARIO
 static void report_page_fault_snapshot(
@@ -503,7 +518,7 @@ static void check_fast_entry_control(void) {
    only the C initializer.  x86 keeps hidden descriptor state after LTR, which
    is part of the documented machine-semantics assumption; STR plus SGDT bind
    the selected descriptor and the stored TSS image that can be reloaded. */
-static void check_direct_port_control(unsigned report) {
+static __attribute__((noinline, noipa)) void check_direct_port_control(unsigned report) {
     struct descriptor gdtr;
     uint16_t task_selector;
     uint64_t flags;
@@ -2447,27 +2462,41 @@ struct pci_manifest_entry {
     uint8_t device, function;
     uint16_t vendor, product;
     uint32_t class_code;
-    uint8_t required, bridge, multifunction;
+    uint8_t required, assigned, bridge, multifunction;
 };
+
+#ifdef LEANOS_ASSIGNED_EDU_SCENARIO
+#define Q35_TOPOLOGY_TEXT "0001000800020003"
+#define Q35_EXPECTED_PRESENT 6u
+#else
+#define Q35_TOPOLOGY_TEXT "0001000800020002"
+#define Q35_EXPECTED_PRESENT 5u
+#endif
 
 /* This is the C rendering of DMAQuarantine.q35Manifest for topology version
    0x0001_0008_0002_0002. Configuration mechanism #1 and the behavior of these
    devices remain trusted hardware/QEMU inputs; acceptance is integration
    evidence and is not a refinement theorem for the Lean snapshot. */
 static const struct pci_manifest_entry q35_pci_manifest[] = {
-    { 0, 0, 0x8086, 0x29c0, 0x060000, 1, 0, 0 },
-    { 1, 0, 0x1234, 0x1111, 0x030000, 1, 0, 0 },
-    { 3, 0, 0x1af4, 0x1000, 0x020000, 0, 0, 0 },
-    { 31, 0, 0x8086, 0x2918, 0x060100, 1, 1, 1 },
-    { 31, 2, 0x8086, 0x2922, 0x010601, 1, 0, 1 },
-    { 31, 3, 0x8086, 0x2930, 0x0c0500, 1, 0, 1 },
+    { 0, 0, 0x8086, 0x29c0, 0x060000, 1, 0, 0, 0 },
+    { 1, 0, 0x1234, 0x1111, 0x030000, 1, 0, 0, 0 },
+    { 3, 0, 0x1af4, 0x1000, 0x020000, 0, 0, 0, 0 },
+    { 31, 0, 0x8086, 0x2918, 0x060100, 1, 0, 1, 1 },
+    { 31, 2, 0x8086, 0x2922, 0x010601, 1, 0, 0, 1 },
+    { 31, 3, 0x8086, 0x2930, 0x0c0500, 1, 0, 0, 1 },
+#ifdef LEANOS_ASSIGNED_EDU_SCENARIO
+    /* The assigned image admits exactly the pinned QEMU EDU function.  It is
+       still quarantined to Command=0 here; publishing its generated tables
+       and enabling its reviewed memory/bus-master bits are later stages. */
+    { 2, 0, 0x1234, 0x11e8, 0x00ff00, 1, 1, 0, 0 },
+#endif
 };
 
 struct pci_snapshot_entry {
     uint16_t vendor, product;
     uint32_t class_code;
     uint16_t command_before, command_after;
-    uint8_t present, bridge, multifunction;
+    uint8_t present, assigned, bridge, multifunction;
 };
 
 /* The one canonical live PCI observation. Boot fills it from hardware, the
@@ -2491,6 +2520,7 @@ static uint64_t pci_snapshot_identity_word(
 static uint64_t pci_snapshot_control_word(
         const struct pci_snapshot_entry *entry) {
     return (uint64_t)(entry->present ? 1u : 0u) |
+        (uint64_t)entry->assigned << 1 |
         (uint64_t)entry->command_after << 2 |
         (uint64_t)entry->bridge << 14 |
         (uint64_t)entry->multifunction << 15;
@@ -2571,6 +2601,7 @@ static __attribute__((noinline, noipa)) void quarantine_q35_pci_dma(void) {
             q35_live_pci_snapshot.functions[index].product = product;
             q35_live_pci_snapshot.functions[index].class_code = class_code;
             q35_live_pci_snapshot.functions[index].command_before = command;
+            q35_live_pci_snapshot.functions[index].assigned = entry->assigned;
             pci_config_command(device, function, expected_command);
             ++writes;
             command = (uint16_t)pci_config_dword(device, function, 0x04);
@@ -2595,12 +2626,15 @@ static __attribute__((noinline, noipa)) void quarantine_q35_pci_dma(void) {
         ++optional_absent;
     }
     if (present == 0) fail("dma-empty-inventory");
-    if (present != 5 || optional_absent != 1 || writes != present ||
-        readbacks != present)
+    if (present != Q35_EXPECTED_PRESENT || optional_absent != 1 ||
+        writes != present || readbacks != present)
         fail("dma-q35-nic-none");
 
     /* Feed the canonical live identity/status/Command/assignment/bridge
-       projection itself through the generated q35Snapshot boundary. */
+       projection itself through the generated q35Snapshot boundary.  The
+       assigned image keeps the first six production entries byte-identical.
+       Its seventh EDU entry is independently bound by the exact generated
+       assigned-authority projection before assigned tables can be installed. */
     q35_live_pci_snapshot.generated_result =
         leanos_validate_q35_dma_snapshot(
             1, UINT64_C(0x0001000800020002),
@@ -2622,7 +2656,8 @@ static __attribute__((noinline, noipa)) void quarantine_q35_pci_dma(void) {
     for (unsigned i = 0;
          i < sizeof(q35_pci_manifest) / sizeof(q35_pci_manifest[0]); ++i) {
         const struct pci_manifest_entry *entry = &q35_pci_manifest[i];
-        serial_puts("LEANOS/15 DMA-FUNCTION manifest=1 topology=0001000800020002 bdf=0:");
+        serial_puts("LEANOS/15 DMA-FUNCTION manifest=1 topology="
+            Q35_TOPOLOGY_TEXT " bdf=0:");
         serial_u64(entry->device);
         serial_putc('.');
         serial_u64(entry->function);
@@ -2638,13 +2673,22 @@ static __attribute__((noinline, noipa)) void quarantine_q35_pci_dma(void) {
         serial_u64(q35_live_pci_snapshot.functions[i].command_before);
         serial_puts(" command-after=");
         serial_u64(q35_live_pci_snapshot.functions[i].command_after);
-        serial_puts(" assigned=0 bridge=");
+        serial_puts(" assigned=");
+        serial_u64(entry->assigned);
+        serial_puts(" bridge=");
         serial_u64(entry->bridge);
         serial_puts(" multifunction=");
         serial_u64(entry->multifunction);
         serial_puts(" policy=accepted\n");
     }
-    serial_puts("LEANOS/15 DMA snapshot=1 topology=0001000800020002 bus=0 scanned=256 present=5 optional-absent=1 writes=5 readbacks=5 initial-bus-masters=");
+    serial_puts("LEANOS/15 DMA snapshot=1 topology=" Q35_TOPOLOGY_TEXT
+        " bus=0 scanned=256 present=");
+    serial_u64(present);
+    serial_puts(" optional-absent=1 writes=");
+    serial_u64(writes);
+    serial_puts(" readbacks=");
+    serial_u64(readbacks);
+    serial_puts(" initial-bus-masters=");
     serial_u64(initially_bus_mastering);
     serial_puts(" initial-bus-master-mask=");
     serial_u64(initial_bus_master_mask);
@@ -2679,9 +2723,17 @@ static __attribute__((noinline, noipa)) void verify_q35_pci_dma(void) {
             uint16_t command = (uint16_t)pci_config_dword(
                 device, function, 0x04);
             if (command != q35_live_pci_snapshot.functions[index].command_after ||
-                (command & PCI_COMMAND_BUS_MASTER) != 0 ||
                 (command & ~PCI_COMMAND_MODEL_MASK) != 0)
                 fail("dma-live-command");
+#ifdef LEANOS_ASSIGNED_EDU_SCENARIO
+            if ((entry->assigned && command !=
+                    (PCI_COMMAND_MEMORY | PCI_COMMAND_BUS_MASTER)) ||
+                (!entry->assigned && command != 0))
+                fail("dma-live-assignment-command");
+#else
+            if ((command & PCI_COMMAND_BUS_MASTER) != 0)
+                fail("dma-live-bus-master");
+#endif
             seen |= 1u << index;
             ++present;
         }
@@ -2691,7 +2743,7 @@ static __attribute__((noinline, noipa)) void verify_q35_pci_dma(void) {
         if (!(seen & (1u << i)) && q35_pci_manifest[i].required)
             fail("dma-live-required-missing");
     }
-    if (present != 5) fail("dma-live-inventory");
+    if (present != Q35_EXPECTED_PRESENT) fail("dma-live-inventory");
 }
 
 /* Reviewed VT-d MMIO accessors: the only code deriving pointers from the
@@ -2714,6 +2766,355 @@ static __attribute__((noinline, noipa)) void vtd_mmio_write64(uint64_t offset,
         uint64_t value) {
     *(volatile uint64_t *)(__vtd_mmio_window_start + offset) = value;
 }
+
+#ifdef LEANOS_ASSIGNED_EDU_SCENARIO
+/* Reviewed assigned-image EDU accessor.  The virtual window is generated as
+   supervisor-only and is bound to the exact BAR read back from PCI config. */
+static __attribute__((noinline, noipa)) uint32_t edu_mmio_read32(uint64_t offset) {
+    return *(volatile uint32_t *)(__edu_mmio_window_start + offset);
+}
+
+static __attribute__((noinline, noipa)) uint64_t edu_mmio_read64(uint64_t offset) {
+    return *(volatile uint64_t *)(__edu_mmio_window_start + offset);
+}
+
+static __attribute__((noinline, noipa)) void edu_mmio_write64(uint64_t offset,
+        uint64_t value) {
+    *(volatile uint64_t *)(__edu_mmio_window_start + offset) = value;
+}
+
+#ifdef LEANOS_ASSIGNED_EDU_WRONG_BAR_FIXTURE
+#define EDU_BAR_BASE UINT32_C(0xFEB00000)
+#else
+#define EDU_BAR_BASE UINT32_C(0xFEA00000)
+#endif
+#define EDU_BAR_MASK UINT32_C(0xFFFFFFF0)
+#define EDU_REG_ID 0x00
+#define EDU_REG_DMA_SOURCE 0x80
+#define EDU_REG_DMA_DESTINATION 0x88
+#define EDU_REG_DMA_COUNT 0x90
+#define EDU_REG_DMA_COMMAND 0x98
+#define EDU_DMA_START UINT64_C(1)
+#define EDU_DMA_FROM_DEVICE UINT64_C(2)
+#define EDU_DEVICE_BUFFER UINT64_C(0x40000)
+#define EDU_TRANSFER_BYTES UINT64_C(16)
+#define EDU_DMA_POLL_BOUND 1000000u
+#ifdef LEANOS_ASSIGNED_EDU_WRONG_MMIO_IDENTITY_FIXTURE
+#define EDU_EXPECTED_ID UINT32_C(0x010000EC)
+#else
+#define EDU_EXPECTED_ID UINT32_C(0x010000ED)
+#endif
+#endif
+
+#ifdef LEANOS_ASSIGNED_EDU_SCENARIO
+static volatile uint64_t assigned_edu_kernel_record[2];
+
+static void edu_wait_transfer(void) {
+    for (unsigned attempt = 0; attempt < EDU_DMA_POLL_BOUND; ++attempt)
+        if (!(edu_mmio_read64(EDU_REG_DMA_COMMAND) & EDU_DMA_START)) return;
+    fail("vtd-assigned-transfer-timeout");
+}
+
+static void vtd_invalidate_global_iotlb(void);
+
+/* Execute the first fixed useful transfer pair only after the generated
+   authority boundary accepts both requests.  The finite model uses 16-byte
+   IOVAs; the generated hardware projection scales those two pages to 4 KiB
+   while keeping the request identity, generation, length, and direction
+   kernel-owned. */
+static __attribute__((noinline)) void run_assigned_edu_transfers(void) {
+    const uint64_t payload0 = UINT64_C(0x363121534f6e6165);
+    const uint64_t payload1 = UINT64_C(0x4d4d554f492d5544);
+    const uint64_t guard0 = UINT64_C(0xc35ac35ac35ac35a);
+    const uint64_t guard1 = UINT64_C(0xa53ca53ca53ca53c);
+    const uint64_t sentinel0 = UINT64_C(0x73656e74696e656c);
+    const uint64_t sentinel1 = UINT64_C(0x2d726561642d6564);
+    const uint64_t secret0 = UINT64_C(0x7365637265742d30);
+    const uint64_t secret1 = UINT64_C(0x7365637265742d31);
+    const uint64_t subject0 = UINT64_C(0x7375626a65637430);
+    const uint64_t subject1 = UINT64_C(0x7375626a65637431);
+    const uint64_t kernel0 = UINT64_C(0x6b65726e656c2d30);
+    const uint64_t kernel1 = UINT64_C(0x6b65726e656c2d31);
+    const uint64_t user_stack_page = (uint64_t)user_a_stack / PAGE_BYTES;
+
+    if (leanos_validate_assigned_edu_transfer(
+            1, LEANOS_VTD_ASSIGNED_SOURCE, LEANOS_VTD_ASSIGNED_GENERATION,
+            LEANOS_VTD_MODEL_READ_IOVA, LEANOS_VTD_MODEL_READ_LENGTH, 1) != 0)
+        fail("vtd-assigned-read-authority");
+    if (leanos_validate_assigned_edu_transfer(
+            1, LEANOS_VTD_ASSIGNED_SOURCE, LEANOS_VTD_ASSIGNED_GENERATION,
+            LEANOS_VTD_MODEL_WRITE_IOVA, LEANOS_VTD_MODEL_WRITE_LENGTH, 2) != 0)
+        fail("vtd-assigned-write-authority");
+
+    volatile uint64_t *read_buffer =
+        (volatile uint64_t *)vtd_assigned_read_buffer;
+    volatile uint64_t *write_buffer =
+        (volatile uint64_t *)vtd_assigned_write_buffer;
+    volatile uint64_t *guard_before =
+        (volatile uint64_t *)vtd_assigned_guard_before;
+    volatile uint64_t *guard_after =
+        (volatile uint64_t *)vtd_assigned_guard_after;
+    for (uint64_t word = 0; word < PAGE_BYTES / sizeof(uint64_t); ++word) {
+        guard_before[word] = guard0 ^ word;
+        guard_after[word] = guard1 ^ word;
+    }
+    ((volatile uint64_t *)user_a_stack)[0] = subject0;
+    ((volatile uint64_t *)user_a_stack)[1] = subject1;
+    assigned_edu_kernel_record[0] = kernel0;
+    assigned_edu_kernel_record[1] = kernel1;
+    /* Snapshot after the initialization write has legitimately populated the
+       CPU accessed/dirty metadata; later DMA must not change these entries. */
+    const uint64_t protected_page_table_record[4] = {
+        page_map_level_4_a[0], page_directory_pointer_a[0],
+        page_directory_a[0], page_table_a[user_stack_page]
+    };
+    read_buffer[0] = payload0;
+    read_buffer[1] = payload1;
+    write_buffer[0] = 0;
+    write_buffer[1] = 0;
+
+    edu_mmio_write64(EDU_REG_DMA_SOURCE, 0);
+    edu_mmio_write64(EDU_REG_DMA_DESTINATION, EDU_DEVICE_BUFFER);
+    edu_mmio_write64(EDU_REG_DMA_COUNT, EDU_TRANSFER_BYTES);
+    edu_mmio_write64(EDU_REG_DMA_COMMAND, EDU_DMA_START);
+    edu_wait_transfer();
+    if (read_buffer[0] != payload0 || read_buffer[1] != payload1)
+        fail("vtd-assigned-read-source");
+
+    edu_mmio_write64(EDU_REG_DMA_SOURCE, EDU_DEVICE_BUFFER);
+    edu_mmio_write64(EDU_REG_DMA_DESTINATION, PAGE_BYTES);
+    edu_mmio_write64(EDU_REG_DMA_COUNT, EDU_TRANSFER_BYTES);
+    edu_mmio_write64(
+        EDU_REG_DMA_COMMAND, EDU_DMA_START | EDU_DMA_FROM_DEVICE);
+    edu_wait_transfer();
+    if (write_buffer[0] != payload0 || write_buffer[1] != payload1)
+        fail("vtd-assigned-write-result");
+    if (guard_before[0] != guard0 || guard_after[0] != guard1)
+        fail("vtd-assigned-transfer-canary");
+    if (vtd_mmio_read32(0x34) != 0)
+        fail("vtd-assigned-transfer-fault");
+
+    /* Preload an independent device sentinel through the authorized read
+       window, then attempt the same direction against the write-only IOVA.
+       Bind the typed hardware fault to the current assignment before using
+       authorized writes to prove the target did not receive the secret and
+       an adjacent device-local sentinel record remained unchanged. */
+    read_buffer[0] = sentinel0;
+    read_buffer[1] = sentinel1;
+    write_buffer[0] = secret0;
+    write_buffer[1] = secret1;
+    edu_mmio_write64(EDU_REG_DMA_SOURCE, 0);
+    edu_mmio_write64(EDU_REG_DMA_DESTINATION, EDU_DEVICE_BUFFER);
+    edu_mmio_write64(EDU_REG_DMA_COUNT, EDU_TRANSFER_BYTES);
+    edu_mmio_write64(EDU_REG_DMA_COMMAND, EDU_DMA_START);
+    edu_wait_transfer();
+    /* QEMU's EDU DMA helper zero-fills the failed read destination. Preserve
+       this second copy outside that target as the independent sentinel. */
+    edu_mmio_write64(EDU_REG_DMA_SOURCE, 0);
+    edu_mmio_write64(
+        EDU_REG_DMA_DESTINATION, EDU_DEVICE_BUFFER + EDU_TRANSFER_BYTES);
+    edu_mmio_write64(EDU_REG_DMA_COUNT, EDU_TRANSFER_BYTES);
+    edu_mmio_write64(EDU_REG_DMA_COMMAND, EDU_DMA_START);
+    edu_wait_transfer();
+    /* The preceding authorized write populated QEMU's IOTLB for this IOVA.
+       Force a fresh second-level permission walk so the wrong-direction read
+       must produce the typed VT-d fault required by the evidence contract. */
+    vtd_invalidate_global_iotlb();
+    edu_mmio_write64(EDU_REG_DMA_SOURCE, PAGE_BYTES);
+    edu_mmio_write64(EDU_REG_DMA_DESTINATION, EDU_DEVICE_BUFFER);
+    edu_mmio_write64(EDU_REG_DMA_COUNT, EDU_TRANSFER_BYTES);
+    edu_mmio_write64(EDU_REG_DMA_COMMAND, EDU_DMA_START);
+    edu_wait_transfer();
+    uint64_t fault_status = vtd_mmio_read32(0x34);
+    uint64_t fault_low = vtd_mmio_read64(0x220);
+    uint64_t fault_high = vtd_mmio_read64(0x228);
+    uint64_t fault_binding = leanos_validate_assigned_edu_fault(
+            1, LEANOS_VTD_ASSIGNED_SOURCE, LEANOS_VTD_ASSIGNED_DOMAIN,
+#ifdef LEANOS_ASSIGNED_EDU_FORGED_FAULT_FIXTURE
+            LEANOS_VTD_ASSIGNED_GENERATION, 0, 1,
+#else
+            LEANOS_VTD_ASSIGNED_GENERATION, PAGE_BYTES, 1,
+#endif
+            fault_status, fault_low, fault_high);
+    if (fault_binding != 0) {
+        serial_puts("LEANOS/21 VTD-FAULT binding=");
+        serial_u64(fault_binding);
+        serial_puts(" fsts="); serial_u64(fault_status);
+        serial_puts(" low="); serial_u64(fault_low);
+        serial_puts(" high="); serial_u64(fault_high);
+        edu_mmio_write64(EDU_REG_DMA_SOURCE, EDU_DEVICE_BUFFER);
+        edu_mmio_write64(EDU_REG_DMA_DESTINATION, PAGE_BYTES);
+        edu_mmio_write64(EDU_REG_DMA_COUNT, EDU_TRANSFER_BYTES);
+        edu_mmio_write64(
+            EDU_REG_DMA_COMMAND, EDU_DMA_START | EDU_DMA_FROM_DEVICE);
+        edu_wait_transfer();
+        serial_puts(" device-buffer=");
+        serial_puts(write_buffer[0] == sentinel0 && write_buffer[1] == sentinel1
+            ? "sentinel"
+            : write_buffer[0] == secret0 && write_buffer[1] == secret1
+                ? "secret" : "other");
+        serial_puts(" observed0="); serial_u64(write_buffer[0]);
+        serial_puts(" observed1="); serial_u64(write_buffer[1]);
+        serial_puts(" result=REJECTED\n");
+        fail("vtd-assigned-fault-binding");
+    }
+#ifdef LEANOS_ASSIGNED_EDU_WRONG_FAULT_VICTIM_FIXTURE
+    write_buffer[0] ^= UINT64_C(1);
+#endif
+    if (write_buffer[0] != secret0 || write_buffer[1] != secret1 ||
+        guard_before[0] != guard0 || guard_after[0] != guard1)
+        fail("vtd-assigned-fault-victim");
+    vtd_mmio_write64(0x228, UINT64_C(1) << 63);
+    if (vtd_mmio_read32(0x34) != 0)
+        fail("vtd-assigned-fault-clear");
+    edu_mmio_write64(EDU_REG_DMA_SOURCE, EDU_DEVICE_BUFFER);
+    edu_mmio_write64(EDU_REG_DMA_DESTINATION, PAGE_BYTES);
+    edu_mmio_write64(EDU_REG_DMA_COUNT, EDU_TRANSFER_BYTES);
+    edu_mmio_write64(
+        EDU_REG_DMA_COMMAND, EDU_DMA_START | EDU_DMA_FROM_DEVICE);
+    edu_wait_transfer();
+    if (write_buffer[0] == secret0 && write_buffer[1] == secret1)
+        fail("vtd-assigned-read-secret");
+    write_buffer[0] = 0;
+    write_buffer[1] = 0;
+    edu_mmio_write64(
+        EDU_REG_DMA_SOURCE, EDU_DEVICE_BUFFER + EDU_TRANSFER_BYTES);
+    edu_mmio_write64(EDU_REG_DMA_DESTINATION, PAGE_BYTES);
+    edu_mmio_write64(EDU_REG_DMA_COUNT, EDU_TRANSFER_BYTES);
+    edu_mmio_write64(
+        EDU_REG_DMA_COMMAND, EDU_DMA_START | EDU_DMA_FROM_DEVICE);
+    edu_wait_transfer();
+    if (write_buffer[0] != sentinel0 || write_buffer[1] != sentinel1)
+        fail("vtd-assigned-sentinel-record");
+    serial_puts("LEANOS/21 VTD-FAULT requester=16 domain=0 generation=1"
+        " direction=read iova=4096 reason=6 sid=16 sentinel=unchanged"
+        " victim=unchanged state=current result=PASS\n");
+
+    /* Attempt the converse wrong-direction transfer: the preserved device
+       sentinel may not be written into the read-only IOVA. Bind the second
+       hardware record before accepting the unchanged complete CPU record. */
+    read_buffer[0] = secret0;
+    read_buffer[1] = secret1;
+    vtd_invalidate_global_iotlb();
+    edu_mmio_write64(
+        EDU_REG_DMA_SOURCE, EDU_DEVICE_BUFFER + EDU_TRANSFER_BYTES);
+    edu_mmio_write64(EDU_REG_DMA_DESTINATION, 0);
+    edu_mmio_write64(EDU_REG_DMA_COUNT, EDU_TRANSFER_BYTES);
+    edu_mmio_write64(
+        EDU_REG_DMA_COMMAND, EDU_DMA_START | EDU_DMA_FROM_DEVICE);
+    edu_wait_transfer();
+    fault_status = vtd_mmio_read32(0x34);
+    fault_low = vtd_mmio_read64(0x220);
+    fault_high = vtd_mmio_read64(0x228);
+    fault_binding = leanos_validate_assigned_edu_fault(
+            1, LEANOS_VTD_ASSIGNED_SOURCE, LEANOS_VTD_ASSIGNED_DOMAIN,
+            LEANOS_VTD_ASSIGNED_GENERATION, 0, 2,
+            fault_status, fault_low, fault_high);
+    if (fault_binding != 0) {
+        serial_puts("LEANOS/21 VTD-WRITE-FAULT binding=");
+        serial_u64(fault_binding);
+        serial_puts(" fsts="); serial_u64(fault_status);
+        serial_puts(" low="); serial_u64(fault_low);
+        serial_puts(" high="); serial_u64(fault_high);
+        serial_puts(" result=REJECTED\n");
+        fail("vtd-assigned-write-fault-binding");
+    }
+    if (read_buffer[0] != secret0 || read_buffer[1] != secret1 ||
+        write_buffer[0] != sentinel0 || write_buffer[1] != sentinel1 ||
+        guard_before[0] != guard0 || guard_after[0] != guard1)
+        fail("vtd-assigned-write-fault-victim");
+    vtd_mmio_write64(0x228, UINT64_C(1) << 63);
+    if (vtd_mmio_read32(0x34) != 0)
+        fail("vtd-assigned-write-fault-clear");
+    write_buffer[0] = 0;
+    write_buffer[1] = 0;
+    edu_mmio_write64(
+        EDU_REG_DMA_SOURCE, EDU_DEVICE_BUFFER + EDU_TRANSFER_BYTES);
+    edu_mmio_write64(EDU_REG_DMA_DESTINATION, PAGE_BYTES);
+    edu_mmio_write64(EDU_REG_DMA_COUNT, EDU_TRANSFER_BYTES);
+    edu_mmio_write64(
+        EDU_REG_DMA_COMMAND, EDU_DMA_START | EDU_DMA_FROM_DEVICE);
+    edu_wait_transfer();
+    if (write_buffer[0] != sentinel0 || write_buffer[1] != sentinel1)
+        fail("vtd-assigned-write-fault-sentinel");
+    serial_puts("LEANOS/21 VTD-FAULT requester=16 domain=0 generation=1"
+        " direction=write iova=0 reason=5 sid=16 sentinel=unchanged"
+        " victim=unchanged state=current result=PASS\n");
+
+    /* QEMU checks second-level read permission before reserved/presence
+       validity, so a zero leaf reports the typed read fault. Bind its wholly
+       unmapped IOVA while all four complete protected records stay intact. */
+    read_buffer[0] = payload0;
+    read_buffer[1] = payload1;
+    write_buffer[0] = secret0;
+    write_buffer[1] = secret1;
+    vtd_invalidate_global_iotlb();
+    edu_mmio_write64(EDU_REG_DMA_SOURCE, 2 * PAGE_BYTES);
+    edu_mmio_write64(EDU_REG_DMA_DESTINATION, EDU_DEVICE_BUFFER);
+    edu_mmio_write64(EDU_REG_DMA_COUNT, EDU_TRANSFER_BYTES);
+    edu_mmio_write64(EDU_REG_DMA_COMMAND, EDU_DMA_START);
+    edu_wait_transfer();
+    fault_status = vtd_mmio_read32(0x34);
+    fault_low = vtd_mmio_read64(0x220);
+    fault_high = vtd_mmio_read64(0x228);
+    fault_binding = leanos_validate_assigned_edu_fault(
+            1, LEANOS_VTD_ASSIGNED_SOURCE, LEANOS_VTD_ASSIGNED_DOMAIN,
+            LEANOS_VTD_ASSIGNED_GENERATION, 2 * PAGE_BYTES, 1,
+            fault_status, fault_low, fault_high);
+    if (fault_binding != 0) {
+        serial_puts("LEANOS/21 VTD-UNMAPPED-FAULT binding=");
+        serial_u64(fault_binding);
+        serial_puts(" fsts="); serial_u64(fault_status);
+        serial_puts(" low="); serial_u64(fault_low);
+        serial_puts(" high="); serial_u64(fault_high);
+        serial_puts(" result=REJECTED\n");
+        fail("vtd-assigned-unmapped-fault-binding");
+    }
+    if (read_buffer[0] != payload0 || read_buffer[1] != payload1 ||
+        write_buffer[0] != secret0 || write_buffer[1] != secret1 ||
+        guard_before[0] != guard0 || guard_after[0] != guard1)
+        fail("vtd-assigned-unmapped-fault-victim");
+    vtd_mmio_write64(0x228, UINT64_C(1) << 63);
+    if (vtd_mmio_read32(0x34) != 0)
+        fail("vtd-assigned-unmapped-fault-clear");
+    if (((volatile uint64_t *)user_a_stack)[0] != subject0 ||
+        ((volatile uint64_t *)user_a_stack)[1] != subject1)
+        fail("vtd-assigned-protected-subject");
+    if (assigned_edu_kernel_record[0] != kernel0 ||
+        assigned_edu_kernel_record[1] != kernel1)
+        fail("vtd-assigned-protected-kernel");
+    if (page_map_level_4_a[0] != protected_page_table_record[0] ||
+        page_directory_pointer_a[0] != protected_page_table_record[1] ||
+        page_directory_a[0] != protected_page_table_record[2] ||
+        page_table_a[user_stack_page] != protected_page_table_record[3])
+        fail("vtd-assigned-protected-cpu-tables");
+    for (uint64_t word = 0; word < PAGE_BYTES / sizeof(uint64_t); ++word) {
+        if (guard_before[word] != (guard0 ^ word) ||
+            guard_after[word] != (guard1 ^ word))
+            fail("vtd-assigned-protected-guards");
+        if (vtd_root_table[word] != leanos_vtd_root_table[word] ||
+            vtd_context_table[word] !=
+                leanos_vtd_assigned_context_table[word])
+            fail("vtd-assigned-protected-vtd-root");
+        if (vtd_second_level_root[word] !=
+                leanos_vtd_assigned_second_level_root[word] ||
+            vtd_second_level_directory[word] !=
+                leanos_vtd_assigned_second_level_directory[word] ||
+            vtd_second_level_table[word] !=
+                leanos_vtd_assigned_second_level_table[word])
+            fail("vtd-assigned-protected-vtd-second-level");
+    }
+    serial_puts("LEANOS/21 VTD-FAULT requester=16 domain=0 generation=1"
+        " direction=read iova=8192 reason=6 sid=16"
+        " protected=subject,kernel,cpu-page-tables,remapping-tables,guards"
+        " records=complete,unchanged"
+        " state=current result=PASS\n");
+
+    serial_puts("LEANOS/21 VTD-TRANSFER requester=16 domain=0 generation=1"
+        " read-iova=0 write-iova=4096 bytes=16 payload=exact"
+        " guards=unchanged fsts=0 result=PASS\n");
+}
+#endif
 
 #define VTD_REG_VERSION 0x00
 #define VTD_REG_CAPABILITY 0x08
@@ -2755,6 +3156,19 @@ static void vtd_wait_invalidation(uint64_t offset, uint64_t busy) {
     fail("vtd-activation-timeout");
 }
 
+static __attribute__((noinline)) void vtd_invalidate_global_iotlb(void) {
+    uint64_t extended_capability =
+        vtd_mmio_read64(VTD_REG_EXTENDED_CAPABILITY);
+    if (extended_capability != LEANOS_VTD_EXPECTED_ECAP)
+        fail("vtd-iotlb-extended-capability");
+    /* ECAP.IRO is in 16-byte units; IVA is the first 64-bit word and IOTLB
+       the second. Keep the derivation and bounded wait shared by boot and the
+       assigned-device evidence probe. */
+    uint64_t iotlb = ((extended_capability >> 8) & 0x3ff) * 16 + 8;
+    vtd_mmio_write64(iotlb, VTD_IOTLB_INVALIDATE | VTD_IOTLB_GLOBAL);
+    vtd_wait_invalidation(iotlb, VTD_IOTLB_INVALIDATE);
+}
+
 /* Validate the quiescent pinned remapping unit, install the generated
    deny-all tables from scrubbed reserved frames, and enable translation in
    the fixed fail-closed order: validate, scrub, construct, publish,
@@ -2777,7 +3191,13 @@ static __attribute__((noinline)) void vtd_boot_remap(void) {
     if (fault_status != 0) fail("vtd-fault-status");
     if ((uint64_t)vtd_root_table != LEANOS_VTD_ROOT_TABLE_FRAME * PAGE_BYTES ||
         (uint64_t)vtd_context_table !=
-            LEANOS_VTD_CONTEXT_TABLE_FRAME * PAGE_BYTES)
+            LEANOS_VTD_CONTEXT_TABLE_FRAME * PAGE_BYTES ||
+        (uint64_t)vtd_second_level_root !=
+            LEANOS_VTD_SECOND_LEVEL_ROOT_FRAME * PAGE_BYTES ||
+        (uint64_t)vtd_second_level_directory !=
+            LEANOS_VTD_SECOND_LEVEL_DIRECTORY_FRAME * PAGE_BYTES ||
+        (uint64_t)vtd_second_level_table !=
+            LEANOS_VTD_SECOND_LEVEL_TABLE_FRAME * PAGE_BYTES)
         fail("vtd-plan-frames");
     if (leanos_vtd_root_table[0] !=
         LEANOS_VTD_CONTEXT_TABLE_FRAME * PAGE_BYTES + 1) fail("vtd-plan-root");
@@ -2785,6 +3205,59 @@ static __attribute__((noinline)) void vtd_boot_remap(void) {
         if (leanos_vtd_root_table[word] != 0) fail("vtd-plan-root");
     for (uint64_t word = 0; word < 512; ++word)
         if (leanos_vtd_context_table[word] != 0) fail("vtd-plan-context");
+    if (LEANOS_VTD_ASSIGNED_REQUESTER != 16 ||
+        (uint64_t)vtd_assigned_read_buffer !=
+            LEANOS_VTD_ASSIGNED_READ_BUFFER_FRAME * PAGE_BYTES ||
+        (uint64_t)vtd_assigned_write_buffer !=
+            LEANOS_VTD_ASSIGNED_WRITE_BUFFER_FRAME * PAGE_BYTES ||
+        (uint64_t)vtd_assigned_read_buffer -
+                (uint64_t)vtd_assigned_guard_before != PAGE_BYTES ||
+        (uint64_t)vtd_assigned_write_buffer -
+                (uint64_t)vtd_assigned_read_buffer != PAGE_BYTES ||
+        (uint64_t)vtd_assigned_guard_after -
+                (uint64_t)vtd_assigned_write_buffer != PAGE_BYTES)
+        fail("vtd-assigned-buffer-layout");
+    if (leanos_validate_assigned_edu_projection(
+            1, LEANOS_VTD_ASSIGNED_TOPOLOGY,
+            LEANOS_VTD_ASSIGNED_DEVICE, LEANOS_VTD_ASSIGNED_SOURCE,
+            LEANOS_VTD_ASSIGNED_GENERATION, LEANOS_VTD_ASSIGNED_DOMAIN,
+            LEANOS_VTD_ASSIGNED_DOMAIN_GENERATION, LEANOS_VTD_ASSIGNED_OWNER,
+            LEANOS_VTD_ASSIGNED_REQUESTER, LEANOS_VTD_SECOND_LEVEL_ROOT_FRAME,
+            LEANOS_VTD_SECOND_LEVEL_DIRECTORY_FRAME,
+            LEANOS_VTD_SECOND_LEVEL_TABLE_FRAME,
+            LEANOS_VTD_ASSIGNED_READ_BUFFER_FRAME,
+            LEANOS_VTD_ASSIGNED_WRITE_BUFFER_FRAME,
+            LEANOS_VTD_MODEL_READ_IOVA, LEANOS_VTD_MODEL_READ_LENGTH,
+            LEANOS_VTD_MODEL_READ_FRAME,
+            LEANOS_VTD_MODEL_READ_FRAME_GENERATION,
+            LEANOS_VTD_MODEL_READ_FRAME_OFFSET,
+            LEANOS_VTD_MODEL_READ_PERMISSION,
+            LEANOS_VTD_MODEL_WRITE_IOVA, LEANOS_VTD_MODEL_WRITE_LENGTH,
+            LEANOS_VTD_MODEL_WRITE_FRAME,
+            LEANOS_VTD_MODEL_WRITE_FRAME_GENERATION,
+            LEANOS_VTD_MODEL_WRITE_FRAME_OFFSET,
+            LEANOS_VTD_MODEL_WRITE_PERMISSION) != 0)
+        fail("vtd-assigned-authority");
+    for (uint64_t word = 0; word < 512; ++word) {
+        uint64_t context_low = LEANOS_VTD_ASSIGNED_REQUESTER * 2;
+        uint64_t expected_context = word == context_low
+            ? LEANOS_VTD_SECOND_LEVEL_ROOT_FRAME * PAGE_BYTES + 1
+            : word == context_low + 1
+                ? LEANOS_VTD_ASSIGNED_DOMAIN * 256 + 1 : 0;
+        uint64_t expected_root = word == 0
+            ? LEANOS_VTD_SECOND_LEVEL_DIRECTORY_FRAME * PAGE_BYTES + 3 : 0;
+        uint64_t expected_directory = word == 0
+            ? LEANOS_VTD_SECOND_LEVEL_TABLE_FRAME * PAGE_BYTES + 3 : 0;
+        uint64_t expected_leaf = word == 0
+            ? LEANOS_VTD_ASSIGNED_READ_BUFFER_FRAME * PAGE_BYTES + 1
+            : word == 1
+                ? LEANOS_VTD_ASSIGNED_WRITE_BUFFER_FRAME * PAGE_BYTES + 2 : 0;
+        if (leanos_vtd_assigned_context_table[word] != expected_context ||
+            leanos_vtd_assigned_second_level_root[word] != expected_root ||
+            leanos_vtd_assigned_second_level_directory[word] != expected_directory ||
+            leanos_vtd_assigned_second_level_table[word] != expected_leaf)
+            fail("vtd-assigned-plan-shape");
+    }
     vtd_journal_record(1);
     serial_puts("LEANOS/21 VTD unit=0 mmio=");
     serial_u64(LEANOS_VTD_MMIO_BASE);
@@ -2802,22 +3275,60 @@ static __attribute__((noinline)) void vtd_boot_remap(void) {
 
     volatile uint64_t *root = (volatile uint64_t *)vtd_root_table;
     volatile uint64_t *context = (volatile uint64_t *)vtd_context_table;
+#ifdef LEANOS_ASSIGNED_EDU_SCENARIO
+    volatile uint64_t *second_root =
+        (volatile uint64_t *)vtd_second_level_root;
+    volatile uint64_t *second_directory =
+        (volatile uint64_t *)vtd_second_level_directory;
+    volatile uint64_t *second_table =
+        (volatile uint64_t *)vtd_second_level_table;
+#endif
     for (uint64_t word = 0; word < 512; ++word) {
         root[word] = 0;
         context[word] = 0;
+#ifdef LEANOS_ASSIGNED_EDU_SCENARIO
+        second_root[word] = 0;
+        second_directory[word] = 0;
+        second_table[word] = 0;
+#endif
     }
-    for (uint64_t word = 0; word < 512; ++word)
+    for (uint64_t word = 0; word < 512; ++word) {
         if (root[word] != 0 || context[word] != 0) fail("vtd-scrub");
+#ifdef LEANOS_ASSIGNED_EDU_SCENARIO
+        if (second_root[word] != 0 || second_directory[word] != 0 ||
+            second_table[word] != 0)
+            fail("vtd-assigned-scrub");
+#endif
+    }
     vtd_journal_record(2);
 
     for (uint64_t word = 0; word < 512; ++word) {
         root[word] = leanos_vtd_root_table[word];
+#ifdef LEANOS_ASSIGNED_EDU_SCENARIO
+        context[word] = leanos_vtd_assigned_context_table[word];
+        second_root[word] = leanos_vtd_assigned_second_level_root[word];
+        second_directory[word] =
+            leanos_vtd_assigned_second_level_directory[word];
+        second_table[word] = leanos_vtd_assigned_second_level_table[word];
+#else
         context[word] = leanos_vtd_context_table[word];
+#endif
     }
-    for (uint64_t word = 0; word < 512; ++word)
+    for (uint64_t word = 0; word < 512; ++word) {
         if (root[word] != leanos_vtd_root_table[word] ||
+#ifdef LEANOS_ASSIGNED_EDU_SCENARIO
+            context[word] != leanos_vtd_assigned_context_table[word] ||
+            second_root[word] !=
+                leanos_vtd_assigned_second_level_root[word] ||
+            second_directory[word] !=
+                leanos_vtd_assigned_second_level_directory[word] ||
+            second_table[word] != leanos_vtd_assigned_second_level_table[word])
+            fail("vtd-assigned-construct");
+#else
             context[word] != leanos_vtd_context_table[word])
             fail("vtd-construct");
+#endif
+    }
     vtd_journal_record(3);
     serial_puts("LEANOS/21 VTD-TABLES root-frame=");
     serial_u64(LEANOS_VTD_ROOT_TABLE_FRAME);
@@ -2838,11 +3349,7 @@ static __attribute__((noinline)) void vtd_boot_remap(void) {
     vtd_wait_invalidation(VTD_REG_CONTEXT_COMMAND, VTD_CCMD_INVALIDATE);
     vtd_journal_record(5);
 
-    /* The IOTLB registers live at ECAP.IRO * 16; the command register is the
-       second 64-bit word of that group. */
-    uint64_t iotlb = ((extended_capability >> 8) & 0x3ff) * 16 + 8;
-    vtd_mmio_write64(iotlb, VTD_IOTLB_INVALIDATE | VTD_IOTLB_GLOBAL);
-    vtd_wait_invalidation(iotlb, VTD_IOTLB_INVALIDATE);
+    vtd_invalidate_global_iotlb();
     vtd_journal_record(6);
 
     vtd_mmio_write32(VTD_REG_GLOBAL_COMMAND, VTD_GCMD_TRANSLATION_ENABLE);
@@ -2861,6 +3368,33 @@ static __attribute__((noinline)) void vtd_boot_remap(void) {
             enabled_status, enabled_faults, enabled_root,
             LEANOS_VTD_ROOT_TABLE_ADDRESS, vtd_journal) != 0)
         fail("vtd-generated-activation");
+#ifdef LEANOS_ASSIGNED_EDU_SCENARIO
+    /* The generated authority and complete live table projection have passed,
+       and translation is enabled.  Only now may the one assigned function
+       decode its MMIO BAR and initiate DMA. */
+    const uint16_t assigned_command =
+        PCI_COMMAND_MEMORY | PCI_COMMAND_BUS_MASTER;
+    uint32_t assigned_bar = pci_config_dword(2, 0, 0x10);
+    if ((assigned_bar & EDU_BAR_MASK) != EDU_BAR_BASE ||
+        (assigned_bar & ~EDU_BAR_MASK) != 0)
+        fail("vtd-assigned-bar");
+    pci_config_command(2, 0, assigned_command);
+    uint16_t assigned_command_readback =
+        (uint16_t)pci_config_dword(2, 0, 0x04);
+    if (assigned_command_readback != assigned_command ||
+        !q35_live_pci_snapshot.functions[6].assigned)
+        fail("vtd-assigned-command");
+    if (edu_mmio_read32(EDU_REG_ID) != EDU_EXPECTED_ID)
+        fail("vtd-assigned-mmio-identity");
+    q35_live_pci_snapshot.functions[6].command_after =
+        assigned_command_readback;
+    run_assigned_edu_transfers();
+    serial_puts("LEANOS/21 VTD-ASSIGN bdf=0:2.0 requester=16 domain=");
+    serial_u64(LEANOS_VTD_ASSIGNED_DOMAIN);
+    serial_puts(" tables=generated-readback bar=4271898624 mmio-id=16777453"
+        " command=6 memory=enabled bus-master=enabled"
+        " stage=post-translation result=PASS\n");
+#endif
     serial_puts("LEANOS/21 VTD-ACTIVATE order=validate,scrub,construct,publish,"
         "invalidate-context,invalidate-iotlb,enable,verify journal=");
     serial_u64(vtd_journal);
@@ -2878,10 +3412,23 @@ static __attribute__((noinline, noipa)) void verify_vtd_state(void) {
         vtd_mmio_read64(VTD_REG_ROOT_TABLE_ADDRESS) !=
             LEANOS_VTD_ROOT_TABLE_ADDRESS)
         fail("vtd-live-status");
-    for (uint64_t word = 0; word < 512; ++word)
+    for (uint64_t word = 0; word < 512; ++word) {
         if (vtd_root_table[word] != leanos_vtd_root_table[word] ||
+#ifdef LEANOS_ASSIGNED_EDU_SCENARIO
+            vtd_context_table[word] !=
+                leanos_vtd_assigned_context_table[word] ||
+            vtd_second_level_root[word] !=
+                leanos_vtd_assigned_second_level_root[word] ||
+            vtd_second_level_directory[word] !=
+                leanos_vtd_assigned_second_level_directory[word] ||
+            vtd_second_level_table[word] !=
+                leanos_vtd_assigned_second_level_table[word])
+            fail("vtd-live-assigned-tables");
+#else
             vtd_context_table[word] != leanos_vtd_context_table[word])
             fail("vtd-live-tables");
+#endif
+    }
 }
 
 #if LEANOS_RETURN_CORRUPTION_MODE == 26
@@ -2912,7 +3459,7 @@ static void serial_init(void) {
     out8(COM1 + 4, 0x0b);
 }
 
-static void serial_putc(char value) {
+static __attribute__((noinline)) void serial_putc(char value) {
     while ((in8(COM1 + 5) & 0x20u) == 0) {
     }
     out8(COM1, (uint8_t)value);

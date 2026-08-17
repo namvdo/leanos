@@ -279,6 +279,20 @@ boot_bootstrap32_ud_probe:
     movl $0x80000000, page_table_a+4(%eax)
     movl $0xFED90003, page_table_b(%eax)
     movl $0x80000000, page_table_b+4(%eax)
+
+    /* The dedicated assigned image alone maps q35 EDU's pinned 4 KiB BAR.
+       The link-visible C constant prevents the shared bootstrap object from
+       widening the ordinary image's MMIO surface. */
+    cmpl $0, leanos_assigned_edu_enabled
+    je 9f
+    mov $__edu_mmio_window_start, %eax
+    shr $9, %eax
+    and $0x7ff8, %eax
+    movl $0xFEA00003, page_table_a(%eax)
+    movl $0x80000000, page_table_a+4(%eax)
+    movl $0xFEA00003, page_table_b(%eax)
+    movl $0x80000000, page_table_b+4(%eax)
+9:
     /* Derive the denial policy instead of inheriting firmware/GRUB state.
        PAE remains enabled for long mode; OSFXSR, OSXMMEXCPT, OSXSAVE, and PKE
        are cleared so no legacy SIMD, XSAVE, or unsaved PKRU state is exposed. */
@@ -466,8 +480,35 @@ vtd_root_table:
 .global vtd_context_table
 vtd_context_table:
     .skip 4096
+/* Reserved storage for the assigned-EDU scenario's 39-bit three-level
+   translation.  The production deny-all plan leaves these pages unpublished;
+   their linker-owned reservation prevents later assignment work from taking
+   allocator-owned memory. */
+.global vtd_second_level_root
+vtd_second_level_root:
+    .skip 4096
+.global vtd_second_level_directory
+vtd_second_level_directory:
+    .skip 4096
+.global vtd_second_level_table
+vtd_second_level_table:
+    .skip 4096
 .global vtd_remapping_table_end
 vtd_remapping_table_end:
+/* Assigned-image DMA window. Guard pages remain absent from the generated
+   second-level tables; only the two middle pages are directionally mapped. */
+.global vtd_assigned_guard_before
+vtd_assigned_guard_before:
+    .skip 4096
+.global vtd_assigned_read_buffer
+vtd_assigned_read_buffer:
+    .skip 4096
+.global vtd_assigned_write_buffer
+vtd_assigned_write_buffer:
+    .skip 4096
+.global vtd_assigned_guard_after
+vtd_assigned_guard_after:
+    .skip 4096
 .align 16
 .global boot_stack
 boot_stack:

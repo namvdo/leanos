@@ -48,22 +48,29 @@ SECTIONS
     . += 4K;
     __vtd_mmio_window_end = .;
   }
+  /* Assigned-image-only virtual window for q35 EDU's pinned BAR.  Ordinary
+     images retain the backing linker page as identity-mapped kernel data. */
+  .edu_mmio_window (NOLOAD) : ALIGN(4K) {
+    __edu_mmio_window_start = .;
+    . += 4K;
+    __edu_mmio_window_end = .;
+  }
   .bss : ALIGN(4K) { *(COMMON) *(.bss .bss.*) }
   . = ALIGN(4K);
   __user_a_text_start = .;
-  .user_a_text : { *(.user.a.text) }
+  .user_a_text : { KEEP(*(.user.a.text)) }
   __user_a_text_end = .;
   . = ALIGN(4K);
   __user_a_stack_start = .;
-  .user_a_bss : { *(.user.a.bss) }
+  .user_a_bss : { KEEP(*(.user.a.bss)) }
   __user_a_stack_end = .;
   . = ALIGN(4K);
   __user_b_text_start = .;
-  .user_b_text : { *(.user.b.text) }
+  .user_b_text : { KEEP(*(.user.b.text)) }
   __user_b_text_end = .;
   . = ALIGN(4K);
   __user_b_stack_start = .;
-  .user_b_bss : { *(.user.b.bss) }
+  .user_b_bss : { KEEP(*(.user.b.bss)) }
   __user_b_stack_end = .;
   . = ALIGN(4K);
   __boot_image_end = .;
