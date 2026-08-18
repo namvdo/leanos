@@ -20695,4 +20695,28 @@ def compositeDispatcherUserFaultFrame : Interrupt.HardwareFrame :=
 def compositeDispatcherKernelFaultFrame : Interrupt.HardwareFrame :=
   demoFrame 14 .kernel
 
+/-- Accepted termination in the canonical dispatcher state retains only
+memory bindings whose allocator status names the same object.  This exposes
+the lifecycle/allocator fact needed by outer authoritative extensions without
+making private synchronized cleanup records part of their trusted surface. -/
+theorem compositeDispatcherTerminateSubjectTwo_binding_owned
+    (plan : BootPageTablePlan.Plan) :
+    ∀ object frame,
+      (authoritativeGate (compositeDispatcherInitial plan)
+          (.ordinary (.terminateSubject 2))).state.virtualMemory.memory.binding
+          object = some frame →
+        FrameAllocator.IsOwnedBy
+          (authoritativeGate (compositeDispatcherInitial plan)
+            (.ordinary (.terminateSubject 2))).state.virtualMemory.memory.allocator
+          frame object := by
+  intro object frame hbinding
+  simp [authoritativeGate_ordinary_state, gate, applyOperation,
+    compositeDispatcherInitial, dispatcherLifecycle, dispatcherCapabilities,
+    dispatcherVirtualMemory, dispatcherMemory, dispatcherScheduler,
+    dispatcherEndpoints, SubjectLifecycle.terminate, installTerminatedSubject,
+    installTerminatedResumable, ResumablePreemption.cleanupSubject,
+    FrameAllocator.IsOwnedBy] at hbinding ⊢
+  rcases hbinding with ⟨rfl, rfl⟩
+  rfl
+
 end LeanOS.FailStop
