@@ -779,6 +779,209 @@ def requiredAuthorityCleanupScopes (before after : AuthoritativeExtension) :
     else .assignment <$> assignmentScopeFor before assignment.handle
   mappings ++ assignments
 
+/-- A capability-subtree revocation cannot hide a removed DMA mapping from
+the cleanup inventory.  Once the checked authoritative successor no longer
+contains a mapping that was present before the transition, its exact
+source/assignment/domain/mapping scope is part of the required completion.
+The operation parameters select the real composite subtree boundary; the
+caller does not supply the successor or its cleanup inventory. -/
+theorem capability_subtree_revocation_removed_mapping_requires_scope
+    (state : AuthoritativeExtension) (authoritySlot victim victimSlot : Nat)
+    (mapping : Mapping) (scope : MappingScope)
+    (hmapping : mapping ∈ state.iommu.core.mappings)
+    (hremoved :
+      (applyKernelOperation state
+          (.ordinary
+            (.capabilityRevokeSubtree authoritySlot victim victimSlot))).iommu.core.mappings.any
+        (·.handle == mapping.handle) = false)
+    (hscope : mappingScopeFor state mapping.handle = some scope) :
+    .mappingSet scope ∈
+      requiredAuthorityCleanupScopes state
+        (applyKernelOperation state
+          (.ordinary
+            (.capabilityRevokeSubtree authoritySlot victim victimSlot))) := by
+  simp only [requiredAuthorityCleanupScopes, List.mem_append]
+  left
+  simp only [List.mem_filterMap]
+  exact ⟨mapping, hmapping, by simp [hremoved, hscope]⟩
+
+/-! A finite parent/child capability fixture keeps the transitive-revocation
+premise executable before it is lifted into the complete authoritative IOMMU
+state.  The selected root and its child carry only endpoint-send authority, so
+the composite runtime-safety guard permits their removal; the independent
+revocation capability is retained. -/
+
+def subtreeCleanupWitnessAuthority : LeanOS.Capability.Capability :=
+  { object := 10
+    kind := .endpoint
+    rights := { revoke := true }
+    identity := 1 }
+
+def subtreeCleanupWitnessRoot : LeanOS.Capability.Capability :=
+  { object := 10
+    kind := .endpoint
+    rights := { send := true }
+    identity := 2 }
+
+def subtreeCleanupWitnessChild : LeanOS.Capability.Capability :=
+  { object := 10
+    kind := .endpoint
+    rights := { send := true }
+    identity := 3
+    parent := some 2 }
+
+def subtreeCleanupWitnessCapabilities : LeanOS.Capability.State :=
+  { nextIdentity := 4
+    derivations := fun identity =>
+      if identity = 1 then
+        some (none, 10, .endpoint, { revoke := true })
+      else if identity = 2 then
+        some (none, 10, .endpoint, { send := true })
+      else if identity = 3 then
+        some (some 2, 10, .endpoint, { send := true })
+      else none
+    subjects := fun subject => subject = 0 || subject = 1 || subject = 2
+    objects := fun object => object = 10
+    kinds := fun object => if object = 10 then some .endpoint else none
+    slots := fun subject slot =>
+      if subject = 0 && slot = 0 then some subtreeCleanupWitnessAuthority
+      else if subject = 1 && slot = 0 then some subtreeCleanupWitnessRoot
+      else if subject = 2 && slot = 0 then some subtreeCleanupWitnessChild
+      else none }
+
+/-- The finite lineage fixture satisfies the complete capability authority
+contract: every live slot agrees with its append-only derivation record, the
+child attenuates its recorded parent, live identities are unique, and no
+capability is installed outside the default four-slot subject spaces. -/
+theorem subtreeCleanupWitnessCapabilities_wellFormed :
+    LeanOS.Capability.WellFormed subtreeCleanupWitnessCapabilities := by
+  simp only [LeanOS.Capability.WellFormed]
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro subject slot capability hslot
+    simp only [subtreeCleanupWitnessCapabilities,
+      subtreeCleanupWitnessAuthority, subtreeCleanupWitnessRoot,
+      subtreeCleanupWitnessChild] at hslot
+    repeat' split at hslot
+    all_goals cases hslot <;>
+      simp [subtreeCleanupWitnessCapabilities,
+        subtreeCleanupWitnessAuthority, subtreeCleanupWitnessRoot,
+        subtreeCleanupWitnessChild, LeanOS.Capability.rightsValid,
+        LeanOS.Capability.rightsSubset]
+    all_goals grind
+  · intro identity parent object kind rights hderivation
+    simp only [subtreeCleanupWitnessCapabilities] at hderivation
+    repeat' split at hderivation
+    all_goals rcases hderivation with ⟨rfl, rfl, rfl, rfl⟩ <;>
+      simp [subtreeCleanupWitnessCapabilities,
+        LeanOS.Capability.rightsSubset]
+    all_goals grind
+  · intro subject slot capability otherSubject otherSlot otherCapability
+      hslot hother hidentity
+    simp only [subtreeCleanupWitnessCapabilities,
+      subtreeCleanupWitnessAuthority, subtreeCleanupWitnessRoot,
+      subtreeCleanupWitnessChild] at hslot hother
+    repeat' split at hslot
+    all_goals repeat' split at hother
+    all_goals cases hslot <;> cases hother <;> simp_all
+  · intro subject slot hslot
+    change 4 ≤ slot at hslot
+    have hne0 : slot ≠ 0 := by omega
+    simp [subtreeCleanupWitnessCapabilities, hne0]
+
+/-- The checked runtime-safe subtree operation follows the recorded parent
+edge and removes both the selected root and its child atomically.  This is the
+concrete lineage fixture used by the next authoritative-IOMMU composition
+step; it does not yet claim that a DMA mapping was published from this state. -/
+theorem executable_capability_subtree_revocation_removes_parent_and_child :
+    let outcome := LeanOS.Capability.revokeSubtreeRuntimeSafe
+      subtreeCleanupWitnessCapabilities 0 0 1 0
+    outcome.result = .accepted ∧
+      outcome.state.slots 1 0 = none ∧
+      outcome.state.slots 2 0 = none ∧
+      outcome.state.slots 0 0 = some subtreeCleanupWitnessAuthority := by
+  native_decide
+
+/-! ## Capability-lineage/DMA composition boundary
+
+The executable subtree fixture above deliberately uses endpoint-send rights:
+those rights may be removed by the existing generic runtime-safe revocation
+gate.  This is not yet a DMA-authority fixture.  The finite checks below make
+the missing composition explicit instead of silently treating an endpoint
+lineage as mapping authority.
+-/
+
+def subtreeCleanupWitnessDMAAttemptCapability : Capability :=
+  { slot := 0
+    identity := subtreeCleanupWitnessChild.identity
+    owner := 2
+    object := subtreeCleanupWitnessChild.object
+    frame := ⟨4, 1⟩
+    offset := 0
+    length := 64
+    permission := readWrite }
+
+def subtreeCleanupWitnessDMAAttemptCore : Core :=
+  { emptyCore with
+    currentOwner := 2
+    frames := [⟨⟨4, 1⟩, 2, true, false, false, false, 64⟩]
+    capabilityAuthority := subtreeCleanupWitnessCapabilities
+    frameAuthority := fun object =>
+      if object == subtreeCleanupWitnessChild.object then some ⟨4, 1⟩ else none
+    capabilities := [subtreeCleanupWitnessDMAAttemptCapability] }
+
+/-- Endpoint lineage cannot be reinterpreted as memory/DMA authority merely
+because its object and identity match.  The finite IOMMU validator checks the
+authoritative capability kind and rejects this attempted binding. -/
+theorem subtree_cleanup_endpoint_lineage_cannot_authorize_dma :
+    capabilityValid subtreeCleanupWitnessDMAAttemptCore
+      subtreeCleanupWitnessDMAAttemptCapability = false := by
+  native_decide
+
+/-- Conversely, the canonical memory capability that can authorize the DMA
+frame carries runtime-critical read/write rights, so the generic subtree gate
+must reject its removal.  The lifecycle composition therefore needs one
+coordinated checked front door that removes the capability descendants and
+their IOMMU authority together; neither existing gate can be reused alone. -/
+theorem canonical_dma_memory_subtree_requires_coordinated_cleanup
+    (plan : BootPageTablePlan.Plan) :
+    LeanOS.Capability.subtreeRevocationRuntimeSafe
+      (FailStop.compositeDispatcherInitial plan).capabilities 2 2 = false := by
+  rfl
+
+/-! The conservative rejection above must not be confused with an inability
+to derive the requested capability successor.  The raw capability transition
+is deterministic and accepted for the canonical subject-2 memory root; it
+removes that exact root.  What is missing is a publisher that installs this
+already-derived successor together with the IOMMU cleanup, rather than asking
+the generic runtime gate to publish the capability change by itself. -/
+
+def canonicalDMAMemorySubtreeRawAfter (plan : BootPageTablePlan.Plan) :
+    LeanOS.Capability.Outcome :=
+  LeanOS.Capability.revokeSubtree
+    (FailStop.compositeDispatcherInitial plan).capabilities 2 2 2 2
+
+/-- The checked raw transition derives the transitive capability successor
+from the authoritative pre-state: the selected memory root is removed and no
+caller supplies a replacement capability store. -/
+theorem canonical_dma_memory_raw_subtree_derives_successor
+    (plan : BootPageTablePlan.Plan) :
+    (canonicalDMAMemorySubtreeRawAfter plan).result = .accepted ∧
+      (canonicalDMAMemorySubtreeRawAfter plan).state.slots 2 2 = none := by
+  simp [canonicalDMAMemorySubtreeRawAfter, LeanOS.Capability.revokeSubtree,
+    LeanOS.Capability.lookup, FailStop.compositeDispatcherInitial]
+  native_decide
+
+/-- The ordinary runtime-facing operation deliberately stutters on that same
+request.  This pins the exact integration gap: a coordinated front door must
+use the checked raw successor while simultaneously removing DMA authority;
+silently weakening the existing runtime-safety guard is not an option. -/
+theorem canonical_dma_memory_ordinary_subtree_gate_stutters
+    (plan : BootPageTablePlan.Plan) :
+    (FailStop.authoritativeGate (FailStop.compositeDispatcherInitial plan)
+      (.ordinary (.capabilityRevokeSubtree 2 2 2))).state =
+        FailStop.compositeDispatcherInitial plan := by
+  rfl
+
 structure PendingAuthorityCleanup where
   ticket : Nat
   scopes : List InvalidationScope
@@ -1129,6 +1332,17 @@ theorem acknowledge_authority_cleanup_wrong_ticket_inert
     (acknowledgeAuthorityCleanupPublication state completion).accepted = false ∧
       (acknowledgeAuthorityCleanupPublication state completion).state = state := by
   simp [acknowledgeAuthorityCleanupPublication, hpending, hticket]
+
+/-- A completion that reproduces the ticket but omits, adds, or reorders any
+internally derived cleanup scope cannot publish the logical successor.  The
+entire authoritative/cache/pending state remains unchanged. -/
+theorem acknowledge_authority_cleanup_wrong_scopes_inert
+    state completion pending
+    (hpending : state.pending = some pending)
+    (hscopes : completion.scopes ≠ pending.scopes) :
+    (acknowledgeAuthorityCleanupPublication state completion).accepted = false ∧
+      (acknowledgeAuthorityCleanupPublication state completion).state = state := by
+  simp [acknowledgeAuthorityCleanupPublication, hpending, hscopes]
 
 theorem acknowledge_authority_cleanup_accepted_publishes_exact
     state completion
@@ -1489,6 +1703,16 @@ def subjectTerminationWitnessCompletion : AuthorityCleanupCompletion :=
   { ticket := 7
     scopes := subjectTerminationWitnessScopes }
 
+/-- A forged partial completion retains the correct ticket but reports only
+the mapping invalidation, omitting the assignment-wide cleanup scope. -/
+def subjectTerminationWitnessPartialCompletion : AuthorityCleanupCompletion :=
+  { ticket := 7
+    scopes := [ .mappingSet {
+      source := subjectTerminationWitnessAssignment.source
+      assignment := subjectTerminationWitnessAssignment.handle
+      domain := subjectTerminationWitnessAssignment.domain
+      mapping := subjectTerminationWitnessMapping.handle } ] }
+
 /-- The exact finite completion publishes both the supplied checked logical
 successor and the fully invalidated cache, and clears the pending ticket. -/
 theorem executable_subject_termination_exact_completion_witness
@@ -1503,6 +1727,23 @@ theorem executable_subject_termination_exact_completion_witness
       acknowledged.state.pending = none := by
   simp [subjectTerminationWitnessPublicationState,
     subjectTerminationWitnessCompletion, acknowledgeAuthorityCleanupPublication]
+
+/-- Partial cleanup acknowledgement is fail-closed: neither the checked
+termination successor nor the invalidated cache can become visible, and the
+complete pending ticket remains available for exact completion. -/
+theorem executable_subject_termination_partial_completion_inert
+    (before after : AuthoritativeExtension) :
+    let state := subjectTerminationWitnessPublicationState before after
+    let acknowledged := acknowledgeAuthorityCleanupPublication state
+      subjectTerminationWitnessPartialCompletion
+    acknowledged.accepted = false ∧ acknowledged.state = state ∧
+      acknowledged.state.authoritative = before ∧
+      acknowledged.state.cache = [subjectTerminationWitnessEntry] ∧
+      acknowledged.state.pending.isSome = true := by
+  simp [subjectTerminationWitnessPublicationState,
+    subjectTerminationWitnessPartialCompletion,
+    subjectTerminationWitnessScopes,
+    acknowledgeAuthorityCleanupPublication]
 
 /-- The old mapping and assignment are live, the cache contains their exact
 translation, and complete subject cleanup makes that old key unreachable. -/
@@ -2157,6 +2398,96 @@ theorem subject_termination_checked_authoritative_acknowledges_exact_cleanup
     invalidateScopes, scopeCoversKey]
   all_goals native_decide
 
+/-- Preparation of the canonical subject-2 cleanup keeps every old authority
+projection published until the exact completion arrives.  In particular, the
+subject remains live, its DMA mapping remains authoritative, and the stale
+translation remains observable while the internally derived cleanup ticket is
+pending. -/
+theorem subject_termination_checked_authoritative_prepare_retains_old_authority
+    (plan : BootPageTablePlan.Plan) :
+    let prepared := prepareAuthoritativePublication
+      (subjectTerminationCheckedAuthoritativePublicationState plan)
+      (subject_termination_checked_before_invariant plan)
+      (.cleanup (.ordinary (.terminateSubject 2)))
+    prepared.state.authoritative.kernel.capabilities.subjects 2 = true ∧
+      prepared.state.authoritative.iommu.core.mappings =
+        [subjectTerminationWitnessMapping] ∧
+      lookup prepared.state.cache subjectTerminationWitnessKey =
+        some subjectTerminationWitnessEntry ∧
+      prepared.state.pending.isSome = true := by
+  have hremoved := subject_termination_checked_apply_removes_device_authority plan
+  have hscopes := subject_termination_checked_removed_authority_scopes plan
+    (subjectTerminationCheckedAfter plan) hremoved.2 hremoved.1
+  simp only [prepareAuthoritativePublication,
+    prepareAuthorityCleanupPublication,
+    subjectTerminationCheckedAuthoritativePublicationState]
+  rw [show applyKernelOperation (subjectTerminationCheckedBefore plan)
+      (.ordinary (.terminateSubject 2)) =
+        subjectTerminationCheckedAfter plan by rfl]
+  rw [hscopes]
+  simp [subjectTerminationCheckedBefore, subjectTerminationCheckedIOMMU,
+    subjectTerminationCheckedCore, authoritativeSample,
+    FailStop.compositeDispatcherInitial, subjectTerminationWitnessScopes,
+    subjectTerminationWitnessEntry, subjectTerminationWitnessKey,
+    subjectTerminationWitnessMapping]
+  exact executable_subject_termination_cleanup_witness.2.2.1
+
+/-- Exact completion of that same pending ticket publishes all three coupled
+facts together: the old subject is retired, its mapping inventory is empty,
+and the old translation key is absent. -/
+theorem subject_termination_checked_authoritative_exact_completion_removes_old_authority
+    (plan : BootPageTablePlan.Plan) :
+    let prepared := prepareAuthoritativePublication
+      (subjectTerminationCheckedAuthoritativePublicationState plan)
+      (subject_termination_checked_before_invariant plan)
+      (.cleanup (.ordinary (.terminateSubject 2)))
+    let acknowledged := acknowledgeAuthoritativePublication prepared.state
+      (.cleanup subjectTerminationWitnessCompletion)
+    acknowledged.accepted = true ∧
+      acknowledged.state.authoritative.kernel.capabilities.subjects 2 = false ∧
+      acknowledged.state.authoritative.iommu.core.mappings = [] ∧
+      lookup acknowledged.state.cache subjectTerminationWitnessKey = none ∧
+      acknowledged.state.pending = none := by
+  have hexact :=
+    subject_termination_checked_authoritative_acknowledges_exact_cleanup plan
+  simp only at hexact ⊢
+  rcases hexact with ⟨haccepted, hauthoritative, hcache, hpending⟩
+  have hremoved := subject_termination_checked_apply_removes_device_authority plan
+  refine ⟨haccepted, ?_, ?_, ?_, hpending⟩
+  · rw [hauthoritative,
+      subject_termination_checked_apply_eq_reconciled_candidate]
+    exact
+      executable_subject_termination_checked_kernel_removes_owner plan
+  · simpa [hauthoritative] using hremoved.2
+  · simp [hcache, lookup]
+
+/-- A completion that names only the mapping scope cannot splice a partial
+cleanup into the canonical front door.  The entire prepared state, including
+the old authority and stale cache, remains byte-for-byte pending. -/
+theorem subject_termination_checked_authoritative_partial_completion_stutters
+    (plan : BootPageTablePlan.Plan) :
+    let prepared := prepareAuthoritativePublication
+      (subjectTerminationCheckedAuthoritativePublicationState plan)
+      (subject_termination_checked_before_invariant plan)
+      (.cleanup (.ordinary (.terminateSubject 2)))
+    let acknowledged := acknowledgeAuthoritativePublication prepared.state
+      (.cleanup subjectTerminationWitnessPartialCompletion)
+    acknowledged.accepted = false ∧ acknowledged.state = prepared.state := by
+  have hremoved := subject_termination_checked_apply_removes_device_authority plan
+  have hscopes := subject_termination_checked_removed_authority_scopes plan
+    (subjectTerminationCheckedAfter plan) hremoved.2 hremoved.1
+  simp only [prepareAuthoritativePublication,
+    prepareAuthorityCleanupPublication,
+    subjectTerminationCheckedAuthoritativePublicationState]
+  rw [show applyKernelOperation (subjectTerminationCheckedBefore plan)
+      (.ordinary (.terminateSubject 2)) =
+        subjectTerminationCheckedAfter plan by rfl]
+  rw [hscopes]
+  simp [acknowledgeAuthoritativePublication,
+    acknowledgeAuthorityCleanupPublication,
+    subjectTerminationWitnessPartialCompletion,
+    subjectTerminationWitnessScopes]
+
 /-! ## Finite control-operation publication witnesses
 
 The same invariant-bearing assignment/mapping/cache fixture also exercises
@@ -2727,6 +3058,103 @@ theorem checked_control_teardown_authoritative_acknowledges_exact
         subjectTerminationWitnessEntry, subjectTerminationWitnessKey,
         subjectTerminationWitnessAssignment, subjectTerminationWitnessMapping]
       all_goals native_decide
+
+/-! ## Assigned-EDU reuse binding
+
+The machine lane uses the generated VT-d projection, whose requester 16 is the
+hardware projection of authoritative model source 0.  This boundary binds the
+hardware call order to the complete old mapping and frame lifetime instead of
+reusing the unrelated hosted scalar example below.
+-/
+
+def assignedEDUReuseKey : Key := {
+  source := 0
+  assignment := IOMMU.assignment0
+  domain := IOMMU.domain0
+  mapping := IOMMU.mapping0
+  iova := 0
+  direction := .read }
+
+def assignedEDUReuseEntry : Entry := {
+  key := assignedEDUReuseKey
+  frame := IOMMU.readOnlyState.core.mappings.head!.frame
+  permission := readOnly }
+
+def assignedEDUReuseInitial : PublicationState := {
+  published := [assignedEDUReuseEntry]
+  pending := none
+  nextTicket := 1 }
+
+private def assignedEDUReuseInputsMatch
+    (version requester source assignment assignmentGeneration domain
+      domainGeneration mapping mappingGeneration modelIova frame frameGeneration
+      hardwareIova : UInt64) : Bool :=
+  version == 1 && requester == 16 &&
+    source == 0 && assignment == 0 && assignmentGeneration == 1 &&
+    domain == 0 && domainGeneration == 1 &&
+    mapping == 0 && mappingGeneration == 1 && modelIova == 0 &&
+    frame == 0 && frameGeneration == 1 &&
+    hardwareIova == 0
+
+def assignedEDUReusePublicationDemo
+    (action version requester source assignment assignmentGeneration domain
+      domainGeneration mapping mappingGeneration modelIova frame frameGeneration
+      hardwareIova : UInt64) : UInt64 :=
+  if !assignedEDUReuseInputsMatch version requester source assignment
+      assignmentGeneration domain domainGeneration mapping mappingGeneration
+      modelIova frame frameGeneration hardwareIova then
+    1
+  else
+    let prepared := prepareInvalidation assignedEDUReuseInitial
+      (.mapping assignedEDUReuseKey)
+    if action = 1 then
+      if prepared.accepted && prepared.state.pending.isSome &&
+          lookup prepared.state.published assignedEDUReuseKey =
+            some assignedEDUReuseEntry then 0 else 2
+    else if action = 2 then
+      let acknowledged := acknowledgeInvalidation prepared.state {
+        ticket := 1, scope := .mapping assignedEDUReuseKey }
+      if acknowledged.accepted && acknowledged.state.pending.isNone &&
+          lookup acknowledged.state.published assignedEDUReuseKey = none then 0 else 3
+    else
+      4
+
+/-- Allocation-free fixed-width validator for the assigned-EDU reuse scope.
+This export validates the two call shapes used by the machine lane; it is not
+a stateful publication protocol and does not by itself prove that completion
+consumes the preparation call.  The source/final-ELF policy pins their machine
+ordering, while the stateful `prepareInvalidation`/`acknowledgeInvalidation`
+model below owns the exact pending-state and replay theorems. -/
+@[export leanos_assigned_edu_reuse_publication]
+def assignedEDUReusePublicationExport
+    (action version requester source assignment assignmentGeneration domain
+      domainGeneration mapping mappingGeneration modelIova frame frameGeneration
+      hardwareIova : UInt64) : UInt64 :=
+  if !assignedEDUReuseInputsMatch version requester source assignment
+      assignmentGeneration domain domainGeneration mapping mappingGeneration
+      modelIova frame frameGeneration hardwareIova then 1
+  else if action = 1 || action = 2 then 0
+  else 4
+
+theorem assigned_edu_reuse_export_agrees_with_protocol :
+    assignedEDUReusePublicationExport 1 1 16 0 0 1 0 1 0 1 0 0 1 0 =
+        assignedEDUReusePublicationDemo 1 1 16 0 0 1 0 1 0 1 0 0 1 0 ∧
+      assignedEDUReusePublicationExport 2 1 16 0 0 1 0 1 0 1 0 0 1 0 =
+        assignedEDUReusePublicationDemo 2 1 16 0 0 1 0 1 0 1 0 0 1 0 ∧
+      assignedEDUReusePublicationExport 1 2 16 0 0 1 0 1 0 1 0 0 1 0 = 1 ∧
+      assignedEDUReusePublicationExport 1 1 17 0 0 1 0 1 0 1 0 0 1 0 = 1 ∧
+      assignedEDUReusePublicationExport 1 1 16 1 0 1 0 1 0 1 0 0 1 0 = 1 ∧
+      assignedEDUReusePublicationExport 1 1 16 0 1 1 0 1 0 1 0 0 1 0 = 1 ∧
+      assignedEDUReusePublicationExport 1 1 16 0 0 2 0 1 0 1 0 0 1 0 = 1 ∧
+      assignedEDUReusePublicationExport 1 1 16 0 0 1 1 1 0 1 0 0 1 0 = 1 ∧
+      assignedEDUReusePublicationExport 1 1 16 0 0 1 0 2 0 1 0 0 1 0 = 1 ∧
+      assignedEDUReusePublicationExport 1 1 16 0 0 1 0 1 1 1 0 0 1 0 = 1 ∧
+      assignedEDUReusePublicationExport 1 1 16 0 0 1 0 1 0 2 0 0 1 0 = 1 ∧
+      assignedEDUReusePublicationExport 1 1 16 0 0 1 0 1 0 1 0x1000 0 1 0 = 1 ∧
+      assignedEDUReusePublicationExport 1 1 16 0 0 1 0 1 0 1 0 1 1 0 = 1 ∧
+      assignedEDUReusePublicationExport 1 1 16 0 0 1 0 1 0 1 0 0 2 0 = 1 ∧
+      assignedEDUReusePublicationExport 1 1 16 0 0 1 0 1 0 1 0 0 1 0x1000 = 1 := by
+  native_decide
 
 /-! ## Fixed-width hosted invalidation sequence
 
