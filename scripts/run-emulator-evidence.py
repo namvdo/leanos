@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import os
@@ -12,6 +13,8 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
+import time
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -443,6 +446,32 @@ def parse_matrix(path: Path) -> tuple[str, list[dict[str, str]]]:
     return matrix_id, rows
 
 
+def select_rows(
+    rows: list[dict[str, str]], scenario: str | None,
+    shard_index: int | None, shard_count: int | None,
+) -> list[dict[str, str]]:
+    """Select one scenario or a stable matrix-order shard."""
+    if scenario is not None and (shard_index is not None or shard_count is not None):
+        raise EvidenceError("scenario selection cannot be combined with sharding")
+    if (shard_index is None) != (shard_count is None):
+        raise EvidenceError("shard index and count must be specified together")
+    if scenario is not None:
+        selected = [row for row in rows if row["id"] == scenario]
+        if not selected:
+            raise EvidenceError(f"scenario is absent from matrix: {scenario}")
+        return selected
+    if shard_index is None or shard_count is None:
+        return rows
+    if shard_count < 1:
+        raise EvidenceError("shard count must be a positive integer")
+    if shard_index < 0 or shard_index >= shard_count:
+        raise EvidenceError("shard index must be between zero and count minus one")
+    selected = rows[shard_index::shard_count]
+    if not selected:
+        raise EvidenceError("selected shard is empty")
+    return selected
+
+
 def expanded(row: dict[str, str], version: str, build_dir: Path) -> dict[str, Path]:
     paths = {
         key: build_dir / row[key].replace("@VERSION@", version)
@@ -548,16 +577,63 @@ def base_report(
     }
 
 
+def execute_scenario(
+    row: dict[str, str], build_dir: Path, version: str,
+    environment: dict[str, str],
+) -> tuple[dict[str, Path], list[str], dict[str, str], str, int, float]:
+    started = time.monotonic()
+    paths = expanded(row, version, build_dir)
+    command, scenario_environment = scenario_invocation(
+        row, paths, build_dir, version
+    )
+    for key in ("serial_log", "dma_snapshot", "vtd_snapshot", "qmp_transcript"):
+        if key in paths:
+            paths[key].unlink(missing_ok=True)
+    combined_environment = environment.copy()
+    combined_environment.update(scenario_environment)
+    # Keep this root short: some runners create a nested AF_UNIX QMP socket,
+    # whose full path must fit Linux's 108-byte sockaddr_un limit.
+    with tempfile.TemporaryDirectory(prefix="le-") as scratch:
+        combined_environment["TMPDIR"] = scratch
+        try:
+            completed = subprocess.run(
+                command, cwd=ROOT, env=combined_environment, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                timeout=int(row["timeout"]) + 5, check=False,
+            )
+            command_output = completed.stdout
+            status = completed.returncode
+        except subprocess.TimeoutExpired as error:
+            command_output = error.stdout or ""
+            if isinstance(command_output, bytes):
+                command_output = command_output.decode(errors="replace")
+            command_output += (
+                "\nfailure_class=matrix-timeout: scenario runner exceeded outer limit\n"
+            )
+            status = 124
+    # Runner diagnostics may include randomized descendants of TMPDIR (for
+    # example the bootstrap64 QMP socket created by mktemp).  Those paths are
+    # execution details, not evidence identity; canonicalize them before the
+    # command log and report are hashed so serial and parallel runs agree.
+    command_output = command_output.replace(scratch, "$SCENARIO_TMPDIR")
+    command_output = re.sub(
+        r"(\$SCENARIO_TMPDIR)/tmp\.[^/\s'\"\\,]+",
+        r"\1/$NESTED_TMPDIR",
+        command_output,
+    )
+    return (
+        paths, command, scenario_environment, command_output, status,
+        time.monotonic() - started,
+    )
+
+
 def run(args: argparse.Namespace) -> None:
     matrix = args.matrix.resolve()
     build_dir = args.build_dir.resolve()
     output = args.output.resolve()
     tools = args.tool_versions.resolve()
     matrix_id, rows = parse_matrix(matrix)
-    if args.scenario is not None:
-        rows = [row for row in rows if row["id"] == args.scenario]
-        if not rows:
-            raise EvidenceError(f"scenario is absent from matrix: {args.scenario}")
+    rows = select_rows(rows, args.scenario, args.shard_index, args.shard_count)
     version = args.version
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
         raise EvidenceError("version must be MAJOR.MINOR.PATCH")
@@ -575,6 +651,9 @@ def run(args: argparse.Namespace) -> None:
     report = base_report(matrix, matrix_id, revision, source_file, tools, qemu)
     write_report(output, report)
 
+    jobs = args.jobs
+    if jobs < 1:
+        raise EvidenceError("jobs must be a positive integer")
     for row in rows:
         paths = expanded(row, version, build_dir)
         for kind in ("image", "elf"):
@@ -582,32 +661,38 @@ def run(args: argparse.Namespace) -> None:
                 raise EvidenceError(
                     f"scenario {row['id']} is missing {kind}: {display_path(paths[kind])}"
                 )
-        command, scenario_environment = scenario_invocation(
-            row, paths, build_dir, version
-        )
-        if "dma_snapshot" in paths:
-            paths["dma_snapshot"].unlink(missing_ok=True)
-        if "vtd_snapshot" in paths:
-            paths["vtd_snapshot"].unlink(missing_ok=True)
-        combined_environment = environment.copy()
-        combined_environment.update(scenario_environment)
-        command_log = output.parent / f"{row['id']}.command.log"
-        print(f"evidence: running {row['id']} ({row['result_class']})", flush=True)
-        try:
-            completed = subprocess.run(
-                command, cwd=ROOT, env=combined_environment, text=True,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                timeout=int(row["timeout"]) + 5, check=False,
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    worker_count = min(jobs, len(rows))
+    print(
+        f"evidence: running {len(rows)} scenarios with {worker_count} workers",
+        flush=True,
+    )
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        executions = {
+            executor.submit(
+                execute_scenario, row, build_dir, version, environment
+            ): row
+            for row in rows
+        }
+        completed_by_id = {}
+        for execution in as_completed(executions):
+            row = executions[execution]
+            result = execution.result()
+            completed_by_id[row["id"]] = result
+            print(
+                f"evidence: completed {row['id']} in {result[-1]:.2f}s",
+                flush=True,
             )
-            command_output = completed.stdout
-            status = completed.returncode
-        except subprocess.TimeoutExpired as error:
-            command_output = (error.stdout or "")
-            if isinstance(command_output, bytes):
-                command_output = command_output.decode(errors="replace")
-            command_output += "\nfailure_class=matrix-timeout: scenario runner exceeded outer limit\n"
-            status = 124
+        completed_scenarios = [completed_by_id[row["id"]] for row in rows]
+
+    for row, execution in zip(rows, completed_scenarios, strict=True):
+        (
+            paths, command, scenario_environment, command_output, status, _duration,
+        ) = execution
+        command_log = output.parent / f"{row['id']}.command.log"
         command_log.write_text(command_output, encoding="utf-8")
+        print(f"evidence: result {row['id']} ({row['result_class']})", flush=True)
         sys.stdout.write(command_output)
         if command_output and not command_output.endswith("\n"):
             sys.stdout.write("\n")
@@ -705,6 +790,8 @@ def run(args: argparse.Namespace) -> None:
     verify_report(
         output, matrix, build_dir, tools, version, environment,
         scenario=args.scenario,
+        shard_index=args.shard_index,
+        shard_count=args.shard_count,
     )
     print(f"emulator evidence matrix passed ({len(rows)} scenarios): {display_path(output)}")
 
@@ -737,12 +824,10 @@ def verify_iotlb_oracle_rows(path: Path, scenario_id: str) -> None:
 def verify_report(
     report_path: Path, matrix: Path, build_dir: Path, tools: Path,
     version: str, environment: dict[str, str], scenario: str | None = None,
+    shard_index: int | None = None, shard_count: int | None = None,
 ) -> None:
     matrix_id, rows = parse_matrix(matrix)
-    if scenario is not None:
-        rows = [row for row in rows if row["id"] == scenario]
-        if not rows:
-            raise EvidenceError(f"scenario is absent from matrix: {scenario}")
+    rows = select_rows(rows, scenario, shard_index, shard_count)
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -936,6 +1021,18 @@ def check_workflows() -> None:
     )
     if ci_emulator is None:
         raise EvidenceError("CI workflow does not define the emulator evidence job")
+    for shard_contract in (
+        "shard: [0, 1, 2, 3]",
+        "--shard-index ${{ matrix.shard }}",
+        "--shard-count 4",
+        "emulator-shard-${{ matrix.shard }}.json",
+        "leanos-boot-${{ github.sha }}-shard-${{ matrix.shard }}",
+    ):
+        if shard_contract not in ci_emulator.group("body"):
+            raise EvidenceError(
+                "CI emulator evidence job does not preserve four-way shard contract: "
+                + shard_contract
+            )
     ci_emulator_timeout = re.search(
         r"(?m)^    timeout-minutes:\s*(\d+)\s*$",
         ci_emulator.group("body"),
@@ -1015,9 +1112,22 @@ def main() -> int:
         subparser.add_argument("--version", default=os.environ.get("LEANOS_VERSION", "0.1.0"))
     run_parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     run_parser.add_argument(
+        "--jobs", type=int, default=max(1, os.cpu_count() or 1),
+        help="maximum concurrent QEMU scenario processes (default: host CPU count)",
+    )
+    run_parser.add_argument(
         "--scenario",
         help="run one named scenario from the validated matrix",
     )
+    for subparser in (run_parser, verify_parser):
+        subparser.add_argument(
+            "--shard-index", type=int,
+            help="zero-based stable matrix shard to run or verify",
+        )
+        subparser.add_argument(
+            "--shard-count", type=int,
+            help="total stable matrix shards to run or verify",
+        )
     verify_parser.add_argument("report", nargs="?", type=Path, default=DEFAULT_OUTPUT)
     args = parser.parse_args()
     try:
@@ -1027,6 +1137,7 @@ def main() -> int:
             verify_report(
                 args.report.resolve(), args.matrix.resolve(), args.build_dir.resolve(),
                 args.tool_versions.resolve(), args.version, os.environ.copy(),
+                shard_index=args.shard_index, shard_count=args.shard_count,
             )
             print(f"verified emulator evidence: {display_path(args.report)}")
         else:

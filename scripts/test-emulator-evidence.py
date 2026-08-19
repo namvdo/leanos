@@ -6,9 +6,12 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
+import threading
+import time
 from types import SimpleNamespace
 from unittest import mock
 
@@ -64,6 +67,9 @@ def prepare_tree(tmp: Path) -> tuple[Path, Path, Path, argparse.Namespace]:
         tool_versions=tools,
         version="0.1.0",
         scenario=None,
+        shard_index=None,
+        shard_count=None,
+        jobs=4,
     )
     return build, output, tools, args
 
@@ -93,6 +99,32 @@ def successful_runner(_command, *, env, **_kwargs):
 def run_fixtures() -> None:
     with tempfile.TemporaryDirectory() as directory:
         tmp = Path(directory)
+
+        _, matrix_rows = evidence.parse_matrix(evidence.DEFAULT_MATRIX)
+        shards = [
+            evidence.select_rows(matrix_rows, None, index, 4)
+            for index in range(4)
+        ]
+        if [row["id"] for shard in shards for row in shard] == [
+            row["id"] for row in matrix_rows
+        ]:
+            raise AssertionError("shards were concatenated instead of interleaved")
+        if sorted(row["id"] for shard in shards for row in shard) != sorted(
+            row["id"] for row in matrix_rows
+        ):
+            raise AssertionError("stable shards do not cover the matrix exactly once")
+        expect_failure(
+            lambda: evidence.select_rows(matrix_rows, "blocking-ipc", 0, 4),
+            "cannot be combined with sharding",
+        )
+        expect_failure(
+            lambda: evidence.select_rows(matrix_rows, None, 0, None),
+            "must be specified together",
+        )
+        expect_failure(
+            lambda: evidence.select_rows(matrix_rows, None, 4, 4),
+            "between zero and count minus one",
+        )
 
         duplicate = tmp / "duplicate.tsv"
         mutate_matrix(
@@ -324,12 +356,79 @@ def run_fixtures() -> None:
 
         build, output, tools, args = prepare_tree(tmp / "success")
         revision = "a" * 40
+        active_runners = 0
+        peak_runners = 0
+        runner_lock = threading.Lock()
+
+        def concurrent_runner(command, **kwargs):
+            nonlocal active_runners, peak_runners
+            scenario_tmp = Path(kwargs["env"]["TMPDIR"])
+            if output.parent in scenario_tmp.parents:
+                raise AssertionError("scenario TMPDIR uses the long build-tree path")
+            with tempfile.TemporaryDirectory(dir=scenario_tmp) as nested_tmp:
+                qmp_path = Path(nested_tmp) / "qmp"
+                if len(os.fsencode(qmp_path)) >= 108:
+                    raise AssertionError("nested QMP socket path exceeds sockaddr_un")
+            with runner_lock:
+                active_runners += 1
+                peak_runners = max(peak_runners, active_runners)
+            try:
+                time.sleep(0.01)
+                result = successful_runner(command, **kwargs)
+                result.stdout = (
+                    "QEMU command: fixture-qemu -qmp "
+                    f"unix:{scenario_tmp}/tmp.dynamic/qmp\n"
+                )
+                return result
+            finally:
+                with runner_lock:
+                    active_runners -= 1
+
+        with (
+            mock.patch.object(evidence, "git_revision", return_value=revision),
+            mock.patch.object(evidence, "qemu_version", return_value="QEMU fixture"),
+            mock.patch.object(evidence.subprocess, "run", side_effect=concurrent_runner),
+        ):
+            evidence.run(args)
+        if peak_runners < 2:
+            raise AssertionError("emulator scenarios did not execute concurrently")
+        parallel_report = output.read_bytes()
+        args.jobs = 1
+        with (
+            mock.patch.object(evidence, "git_revision", return_value=revision),
+            mock.patch.object(evidence, "qemu_version", return_value="QEMU fixture"),
+            mock.patch.object(evidence.subprocess, "run", side_effect=concurrent_runner),
+        ):
+            evidence.run(args)
+        if output.read_bytes() != parallel_report:
+            raise AssertionError("parallel evidence report differs from serial output")
+        report = json.loads(output.read_text(encoding="utf-8"))
+        if not all(
+            result["qemu_commands"] == [
+                " fixture-qemu -qmp unix:$SCENARIO_TMPDIR/$NESTED_TMPDIR/qmp"
+            ]
+            for result in report["results"]
+        ):
+            raise AssertionError("volatile nested TMPDIR path was not canonicalized")
+        args.jobs = 4
+
+        shard_output = output.with_name("shard-1.json")
+        args.output = shard_output
+        args.shard_index = 1
+        args.shard_count = 4
         with (
             mock.patch.object(evidence, "git_revision", return_value=revision),
             mock.patch.object(evidence, "qemu_version", return_value="QEMU fixture"),
             mock.patch.object(evidence.subprocess, "run", side_effect=successful_runner),
         ):
             evidence.run(args)
+        shard_report = json.loads(shard_output.read_text(encoding="utf-8"))
+        assert [result["id"] for result in shard_report["results"]] == [
+            row["id"] for row in matrix_rows[1::4]
+        ]
+        args.output = output
+        args.shard_index = None
+        args.shard_count = None
 
         selected_build, selected_output, _selected_tools, selected_args = prepare_tree(
             tmp / "selected-scenario"
