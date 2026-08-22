@@ -1818,6 +1818,66 @@ def subjectTerminationCheckedBefore (plan : BootPageTablePlan.Plan) :
     iommu := subjectTerminationCheckedIOMMU plan
     scrub := (authoritativeSample plan).scrub }
 
+/-! ## Coordinated capability-subtree/IOMMU successor
+
+The canonical memory root cannot pass the generic runtime-safe subtree gate,
+but its raw checked transition is accepted.  This finite successor couples
+that internally derived capability state to removal of the one assignment,
+mapping, and IOMMU capability which depend on the selected root.  It is the
+logical post-state that a later exact multi-scope publication will install;
+it does not bypass the existing publication or completion boundary.
+-/
+
+noncomputable def canonicalDMAMemorySubtreeCheckedCoreAfter
+    (plan : BootPageTablePlan.Plan) : Core :=
+  { subjectTerminationCheckedCore plan with
+    assignments := []
+    mappings := []
+    capabilityAuthority := (canonicalDMAMemorySubtreeRawAfter plan).state
+    capabilities := [] }
+
+/-- The coordinated finite successor is accepted by the same IOMMU validator
+as ordinary checked states.  In particular, removing the root does not leave
+an IOMMU capability whose identity is absent from authoritative capability
+state, nor a mapping or assignment that can keep naming its frame. -/
+theorem canonical_dma_memory_subtree_checked_core_valid
+    (plan : BootPageTablePlan.Plan) :
+    validateCore (canonicalDMAMemorySubtreeCheckedCoreAfter plan) = true := by
+  simp [canonicalDMAMemorySubtreeCheckedCoreAfter,
+    subjectTerminationCheckedCore, authoritativeSampleCore,
+    canonicalDMAMemorySubtreeRawAfter, LeanOS.Capability.revokeSubtree,
+    LeanOS.Capability.lookup, FailStop.compositeDispatcherInitial]
+  native_decide
+
+/-- All four coupled authority projections disappear in the same logical
+successor: the selected capability root, its IOMMU capability, mapping, and
+assignment.  The raw capability successor is derived from the pre-state; no
+caller supplies a replacement capability store. -/
+theorem canonical_dma_memory_subtree_checked_core_closes_grant
+    (plan : BootPageTablePlan.Plan) :
+    let after := canonicalDMAMemorySubtreeCheckedCoreAfter plan
+    after.capabilityAuthority.slots 2 2 = none ∧
+      after.capabilities = [] ∧
+      after.mappings = [] ∧
+      after.assignments = [] := by
+  have hraw := canonical_dma_memory_raw_subtree_derives_successor plan
+  exact ⟨hraw.2, rfl, rfl, rfl⟩
+
+/-- Package the validated coordinated core as an invariant-carrying IOMMU
+state.  Capability well-formedness is inherited from the checked raw subtree
+transition rather than asserted independently. -/
+noncomputable def canonicalDMAMemorySubtreeCheckedIOMMUAfter
+    (plan : BootPageTablePlan.Plan) : State :=
+  { core := canonicalDMAMemorySubtreeCheckedCoreAfter plan
+    valid := canonical_dma_memory_subtree_checked_core_valid plan
+    capabilityWellFormed := by
+      simpa [canonicalDMAMemorySubtreeCheckedCoreAfter,
+        canonicalDMAMemorySubtreeRawAfter, subjectTerminationCheckedCore,
+        authoritativeSampleCore] using
+        LeanOS.Capability.revokeSubtree_preserves_wellFormed
+          (FailStop.compositeDispatcherInitial plan).capabilities 2 2 2 2
+          (authoritativeSampleIOMMU plan).capabilityWellFormed }
+
 /-- The concrete live assignment/mapping projection is coherent with the
 canonical kernel, capability, frame-binding, and scrub projections. -/
 theorem subject_termination_checked_before_invariant
@@ -2507,6 +2567,78 @@ theorem subject_termination_checked_authoritative_partial_completion_stutters
     subjectTerminationWitnessPartialCompletion,
     subjectTerminationWitnessScopes]
 
+/-- A rejected mapping-only completion leaves the complete subject cleanup
+publication intact, so the later exact completion can still retire the subject,
+remove its descendant DMA mapping, invalidate the old translation, and close
+the pending slot atomically. -/
+theorem subject_termination_checked_authoritative_partial_then_exact_completes
+    (plan : BootPageTablePlan.Plan) :
+    let prepared := prepareAuthoritativePublication
+      (subjectTerminationCheckedAuthoritativePublicationState plan)
+      (subject_termination_checked_before_invariant plan)
+      (.cleanup (.ordinary (.terminateSubject 2)))
+    let partialAck := acknowledgeAuthoritativePublication prepared.state
+      (.cleanup subjectTerminationWitnessPartialCompletion)
+    let completed := acknowledgeAuthoritativePublication partialAck.state
+      (.cleanup subjectTerminationWitnessCompletion)
+    partialAck.accepted = false ∧
+      partialAck.state = prepared.state ∧
+      completed.accepted = true ∧
+      completed.state.authoritative.kernel.capabilities.subjects 2 = false ∧
+      completed.state.authoritative.iommu.core.mappings = [] ∧
+      lookup completed.state.cache subjectTerminationWitnessKey = none ∧
+      completed.state.pending = none := by
+  have hpartial :=
+    subject_termination_checked_authoritative_partial_completion_stutters plan
+  have hexact :=
+    subject_termination_checked_authoritative_exact_completion_removes_old_authority
+      plan
+  dsimp only at hpartial hexact ⊢
+  rcases hpartial with ⟨hpartialAccepted, hpartialState⟩
+  rcases hexact with
+    ⟨hexactAccepted, hexactSubject, hexactMappings, hexactCache,
+      hexactPending⟩
+  rw [hpartialState]
+  exact ⟨hpartialAccepted, rfl, hexactAccepted, hexactSubject,
+    hexactMappings, hexactCache, hexactPending⟩
+
+/-- The composed partial-then-exact sequence also closes every capability
+lookup for the terminated owner.  This makes the capability-reachability
+boundary explicit alongside descendant DMA mapping removal: after exact
+publication, no slot can recover an old grant for subject 2, while the
+mapping, cached translation, and pending ticket are absent in the same
+published state. -/
+theorem subject_termination_checked_authoritative_partial_then_exact_closes_grants
+    (plan : BootPageTablePlan.Plan) :
+    let prepared := prepareAuthoritativePublication
+      (subjectTerminationCheckedAuthoritativePublicationState plan)
+      (subject_termination_checked_before_invariant plan)
+      (.cleanup (.ordinary (.terminateSubject 2)))
+    let partialAck := acknowledgeAuthoritativePublication prepared.state
+      (.cleanup subjectTerminationWitnessPartialCompletion)
+    let completed := acknowledgeAuthoritativePublication partialAck.state
+      (.cleanup subjectTerminationWitnessCompletion)
+    partialAck.accepted = false ∧
+      partialAck.state = prepared.state ∧
+      completed.accepted = true ∧
+      (∀ slot,
+        LeanOS.Capability.lookup
+          completed.state.authoritative.kernel.capabilities 2 slot =
+            .invalidSubject) ∧
+      completed.state.authoritative.iommu.core.mappings = [] ∧
+      lookup completed.state.cache subjectTerminationWitnessKey = none ∧
+      completed.state.pending = none := by
+  have hcompleted :=
+    subject_termination_checked_authoritative_partial_then_exact_completes plan
+  dsimp only at hcompleted ⊢
+  rcases hcompleted with
+    ⟨hpartialAccepted, hpartialState, hexactAccepted, hexactSubject,
+      hexactMappings, hexactCache, hexactPending⟩
+  refine ⟨hpartialAccepted, hpartialState, hexactAccepted, ?_,
+    hexactMappings, hexactCache, hexactPending⟩
+  intro slot
+  simp [LeanOS.Capability.lookup, hexactSubject]
+
 /-! ## Finite control-operation publication witnesses
 
 The same invariant-bearing assignment/mapping/cache fixture also exercises
@@ -3137,6 +3269,38 @@ theorem checked_control_teardown_partial_completion_stutters
       simp [acknowledgeAuthoritativePublication, acknowledgeControlPublication,
         controlCheckedCompletion, controlCheckedMappingScope,
         controlCheckedAssignmentScope]
+
+/-- A rejected descendant-mapping completion cannot consume or corrupt the
+assignment-scoped publication.  The same prepared state subsequently accepts
+the exact assignment completion and publishes removal of every old device
+authority projection atomically. -/
+theorem checked_control_teardown_partial_then_exact_completes
+    (plan : BootPageTablePlan.Plan) :
+    let prepared := prepareAuthoritativePublication
+      (controlCheckedAuthoritativePublicationState plan)
+      (subject_termination_checked_before_invariant plan)
+      (.control (.teardown subjectTerminationWitnessAssignment.handle))
+    let partialAck := acknowledgeAuthoritativePublication prepared.state
+      (controlCheckedCompletion controlCheckedMappingScope)
+    let completed := acknowledgeAuthoritativePublication partialAck.state
+      (controlCheckedCompletion controlCheckedAssignmentScope)
+    partialAck.accepted = false ∧
+      partialAck.state = prepared.state ∧
+      completed.accepted = true ∧
+      completed.state.authoritative.iommu.core.assignments = [] ∧
+      completed.state.authoritative.iommu.core.mappings = [] ∧
+      lookup completed.state.cache subjectTerminationWitnessKey = none ∧
+      completed.state.pending = none := by
+  have hpartial := checked_control_teardown_partial_completion_stutters plan
+  have hexact := checked_control_teardown_authoritative_acknowledges_exact plan
+  dsimp only at hpartial hexact ⊢
+  rcases hpartial with ⟨hpartialAccepted, hpartialState⟩
+  rcases hexact with
+    ⟨hexactAccepted, _hexactAuthoritative, hexactAssignments,
+      hexactMappings, hexactCache, hexactPending⟩
+  rw [hpartialState]
+  exact ⟨hpartialAccepted, rfl, hexactAccepted, hexactAssignments,
+    hexactMappings, hexactCache, hexactPending⟩
 
 /-! ## Assigned-EDU reuse binding
 
