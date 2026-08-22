@@ -532,6 +532,25 @@ theorem cached_release_accepted_requires_guard_allowed state hstate subject slot
     simp_all [gatedCachedMemoryByKernel, CachedMemoryOutcome.isAccepted,
       liftMemoryOutcome]
 
+/-- An accepted cache-aware release is tied to a frame resolved from the
+authoritative subject/slot capability, and that exact frame has passed the
+IOTLB-aware release guard.  This prevents later machine call-order evidence
+from replacing capability resolution with a caller-supplied frame number. -/
+theorem cached_release_accepted_resolves_guarded_frame state hstate subject slot
+    (haccepted :
+      (gatedCachedMemoryByKernel state hstate
+        (.release subject slot)).isAccepted = true) :
+    ∃ frame,
+      resolveReleaseFrame state subject slot = some frame ∧
+        guardExactFrameRelease state frame = .allowed := by
+  have hguard := cached_release_accepted_requires_guard_allowed
+    state hstate subject slot haccepted
+  unfold guardFrameRelease at hguard
+  split at hguard
+  · cases hguard
+  · rename_i frame hresolve
+    exact ⟨frame, hresolve, hguard⟩
+
 theorem cached_release_allowed_delegates state hstate subject slot
     (hguard : guardFrameRelease state subject slot = .allowed) :
     (gatedCachedMemoryByKernel state hstate
@@ -3002,6 +3021,39 @@ theorem checked_control_teardown_gated_accepts
   simp [checked_control_teardown_candidate_coherent plan,
     AuthoritativeOutcome.isAccepted]
 
+/-- Preparing checked assignment teardown cannot make any old device authority
+disappear early.  The assignment, its descendant mapping, and its cached
+translation remain published while the internally derived assignment-scope
+ticket is pending; only exact completion may publish their removal. -/
+theorem checked_control_teardown_authoritative_prepare_retains_old_authority
+    (plan : BootPageTablePlan.Plan) :
+    let prepared := prepareAuthoritativePublication
+      (controlCheckedAuthoritativePublicationState plan)
+      (subject_termination_checked_before_invariant plan)
+      (.control (.teardown subjectTerminationWitnessAssignment.handle))
+    prepared.state.authoritative.iommu.core.assignments =
+        [subjectTerminationWitnessAssignment] ∧
+      prepared.state.authoritative.iommu.core.mappings =
+        [subjectTerminationWitnessMapping] ∧
+      lookup prepared.state.cache subjectTerminationWitnessKey =
+        some subjectTerminationWitnessEntry ∧
+      prepared.state.pending.isSome = true := by
+  simp only [prepareAuthoritativePublication,
+    controlCheckedAuthoritativePublicationState, prepareControlPublication]
+  rw [checked_control_teardown_requires_exact_scope plan]
+  have haccepted := checked_control_teardown_gated_accepts plan
+  cases hgate : gatedByKernel (subjectTerminationCheckedBefore plan)
+      (subject_termination_checked_before_invariant plan)
+      (.teardown subjectTerminationWitnessAssignment.handle) with
+  | rejected reason =>
+      simp [hgate, AuthoritativeOutcome.isAccepted] at haccepted
+  | accepted after hinvariant reply =>
+      simp [subjectTerminationCheckedBefore, subjectTerminationCheckedIOMMU,
+        subjectTerminationCheckedCore, authoritativeSample,
+        FailStop.compositeDispatcherInitial, subjectTerminationWitnessEntry,
+        subjectTerminationWitnessKey, subjectTerminationWitnessAssignment,
+        subjectTerminationWitnessMapping, lookup]
+
 /-- Exact acknowledgement of checked assignment teardown publishes the
 assignment/mapping-free successor, removes the old source/domain cache entry,
 and closes the shared pending slot. -/
@@ -3058,6 +3110,33 @@ theorem checked_control_teardown_authoritative_acknowledges_exact
         subjectTerminationWitnessEntry, subjectTerminationWitnessKey,
         subjectTerminationWitnessAssignment, subjectTerminationWitnessMapping]
       all_goals native_decide
+
+/-- A mapping-scoped completion cannot partially acknowledge assignment
+teardown.  The authoritative assignment, its descendant mapping, the cached
+translation, and the exact assignment-scoped pending publication all remain
+unchanged until the derived teardown scope completes. -/
+theorem checked_control_teardown_partial_completion_stutters
+    (plan : BootPageTablePlan.Plan) :
+    let prepared := prepareAuthoritativePublication
+      (controlCheckedAuthoritativePublicationState plan)
+      (subject_termination_checked_before_invariant plan)
+      (.control (.teardown subjectTerminationWitnessAssignment.handle))
+    let acknowledged := acknowledgeAuthoritativePublication prepared.state
+      (controlCheckedCompletion controlCheckedMappingScope)
+    acknowledged.accepted = false ∧ acknowledged.state = prepared.state := by
+  simp only [prepareAuthoritativePublication,
+    controlCheckedAuthoritativePublicationState, prepareControlPublication]
+  rw [checked_control_teardown_requires_exact_scope plan]
+  have haccepted := checked_control_teardown_gated_accepts plan
+  cases hgate : gatedByKernel (subjectTerminationCheckedBefore plan)
+      (subject_termination_checked_before_invariant plan)
+      (.teardown subjectTerminationWitnessAssignment.handle) with
+  | rejected reason =>
+      simp [hgate, AuthoritativeOutcome.isAccepted] at haccepted
+  | accepted after hinvariant reply =>
+      simp [acknowledgeAuthoritativePublication, acknowledgeControlPublication,
+        controlCheckedCompletion, controlCheckedMappingScope,
+        controlCheckedAssignmentScope]
 
 /-! ## Assigned-EDU reuse binding
 
@@ -3154,6 +3233,404 @@ theorem assigned_edu_reuse_export_agrees_with_protocol :
       assignedEDUReusePublicationExport 1 1 16 0 0 1 0 1 0 1 0 1 1 0 = 1 ∧
       assignedEDUReusePublicationExport 1 1 16 0 0 1 0 1 0 1 0 0 2 0 = 1 ∧
       assignedEDUReusePublicationExport 1 1 16 0 0 1 0 1 0 1 0 0 1 0x1000 = 1 := by
+  native_decide
+
+/-! ## Checked assigned-EDU protocol trace
+
+The fixed-shape validator above intentionally validates individual machine
+calls.  This allocation-free second boundary validates the fixed assigned-EDU
+lifecycle shape as one finite scalar trace.  Its pending ticket is produced
+inside this invocation, consumed by exact completion, and unavailable to a
+requested replay.  The theorem below binds the canonical scalar result back
+to the authoritative publication model; this boundary does not claim that a
+caller-provided scalar is itself a non-forgeable pending token.
+-/
+
+@[export leanos_assigned_edu_reuse_protocol]
+def assignedEDUReuseProtocolExport
+    (prepareRequested completionRequested completionTicket replayRequested : UInt64) :
+    UInt64 :=
+  let pendingAfterPrepare : UInt64 := if prepareRequested = 1 then 1 else 0
+  if pendingAfterPrepare = 0 then
+    2
+  else if completionRequested != 1 then
+    1
+  else if completionTicket != pendingAfterPrepare then
+    3
+  else
+    let pendingAfterCompletion : UInt64 :=
+      if completionTicket = pendingAfterPrepare then 0 else pendingAfterPrepare
+    if pendingAfterCompletion != 0 then
+      5
+    else if replayRequested = 1 then
+      if pendingAfterCompletion = completionTicket then 5 else 4
+    else
+      0
+
+theorem assigned_edu_reuse_protocol_regressions :
+    assignedEDUReuseProtocolExport 1 1 1 0 = 0 ∧
+      assignedEDUReuseProtocolExport 0 1 1 0 = 2 ∧
+      assignedEDUReuseProtocolExport 1 0 1 0 = 1 ∧
+      assignedEDUReuseProtocolExport 1 1 2 0 = 3 ∧
+      assignedEDUReuseProtocolExport 1 1 1 1 = 4 := by
+  native_decide
+
+def assignedEDUReuseProtocolModelAdapter
+    (prepareRequested completionRequested completionTicket replayRequested : UInt64) :
+    UInt64 :=
+  if prepareRequested != 1 then
+    2
+  else
+    let prepared := prepareInvalidation assignedEDUReuseInitial
+      (.mapping assignedEDUReuseKey)
+    if !prepared.accepted then
+      2
+    else if completionRequested != 1 then
+      1
+    else
+      let completion : Completion := {
+        ticket := completionTicket.toNat
+        scope := .mapping assignedEDUReuseKey }
+      let acknowledged := acknowledgeInvalidation prepared.state completion
+      if !acknowledged.accepted then
+        3
+      else if acknowledged.state.pending.isSome then
+        5
+      else if replayRequested = 1 then
+        let replayed := acknowledgeInvalidation acknowledged.state completion
+        if replayed.accepted || replayed.state.pending.isSome then 5 else 4
+      else
+        0
+
+theorem assigned_edu_reuse_protocol_export_agrees_with_model :
+    assignedEDUReuseProtocolExport 1 1 1 0 =
+        assignedEDUReuseProtocolModelAdapter 1 1 1 0 ∧
+      assignedEDUReuseProtocolExport 0 1 1 0 =
+        assignedEDUReuseProtocolModelAdapter 0 1 1 0 ∧
+      assignedEDUReuseProtocolExport 1 0 1 0 =
+        assignedEDUReuseProtocolModelAdapter 1 0 1 0 ∧
+      assignedEDUReuseProtocolExport 1 1 2 0 =
+        assignedEDUReuseProtocolModelAdapter 1 1 2 0 ∧
+      assignedEDUReuseProtocolExport 1 1 1 1 =
+        assignedEDUReuseProtocolModelAdapter 1 1 1 1 := by
+  native_decide
+
+/-! ## Assigned-EDU release gate
+
+Completion of the invalidation protocol is necessary but not sufficient for
+frame reuse: the authoritative mapping and published translation must also
+stop naming the old lifetime.  This fixed-width boundary exposes those three
+ordered checks to the hosted generated-C lane. -/
+
+def frameReleaseGuardCode : FrameReleaseGuard → UInt64
+  | .allowed => 0
+  | .invalidationPending => 1
+  | .mappingLive => 2
+  | .cachedTranslationLive => 3
+  | .missingAuthority => 4
+
+@[export leanos_assigned_edu_reuse_release_gate]
+def assignedEDUReuseReleaseGateExport
+    (completionAccepted mappingLive cacheLive : UInt64) : UInt64 :=
+  if completionAccepted != 1 then 1
+  else if mappingLive = 1 then 2
+  else if cacheLive = 1 then 3
+  else 0
+
+theorem assigned_edu_reuse_release_gate_regressions :
+    assignedEDUReuseReleaseGateExport 0 0 0 = 1 ∧
+      assignedEDUReuseReleaseGateExport 1 1 0 = 2 ∧
+      assignedEDUReuseReleaseGateExport 1 0 1 = 3 ∧
+      assignedEDUReuseReleaseGateExport 1 0 0 = 0 := by
+  native_decide
+
+theorem assigned_edu_reuse_release_pending_agrees_with_model state frame pending
+    (hpending : state.cache.pending = some pending)
+    (hnames : pendingNamesFrame pending frame = true) :
+    assignedEDUReuseReleaseGateExport 0 0 0 =
+      frameReleaseGuardCode (guardExactFrameRelease state frame) := by
+  rw [pending_invalidation_blocks_exact_frame_release state frame pending
+    hpending hnames]
+  rfl
+
+theorem assigned_edu_reuse_release_mapping_agrees_with_model state frame
+    (hpending : state.cache.pending = none)
+    (hmapping :
+      state.authoritative.iommu.core.mappings.any (·.frame == frame) = true) :
+    assignedEDUReuseReleaseGateExport 1 1 0 =
+      frameReleaseGuardCode (guardExactFrameRelease state frame) := by
+  rw [live_mapping_blocks_exact_frame_release state frame hpending hmapping]
+  rfl
+
+theorem assigned_edu_reuse_release_cache_agrees_with_model state frame
+    (hpending : state.cache.pending = none)
+    (hmapping :
+      state.authoritative.iommu.core.mappings.any (·.frame == frame) = false)
+    (hcache : entriesNameFrame state.cache.published frame = true) :
+    assignedEDUReuseReleaseGateExport 1 0 1 =
+      frameReleaseGuardCode (guardExactFrameRelease state frame) := by
+  rw [published_translation_blocks_exact_frame_release state frame hpending
+    hmapping hcache]
+  rfl
+
+theorem assigned_edu_reuse_release_allowed_agrees_with_model state frame
+    (hpending : state.cache.pending = none)
+    (hmapping :
+      state.authoritative.iommu.core.mappings.any (·.frame == frame) = false)
+    (hcache : entriesNameFrame state.cache.published frame = false) :
+    assignedEDUReuseReleaseGateExport 1 0 0 =
+      frameReleaseGuardCode (guardExactFrameRelease state frame) := by
+  rw [exact_frame_release_allowed_only_after_cleanup state frame hpending
+    hmapping hcache]
+  rfl
+
+/-! ## Assigned-EDU fresh-lifetime publication ordering
+
+The clean release decision above is consumed by a second small state machine.
+It makes release, scrub completion, and fresh-lifetime publication distinct
+steps: a rejected step stutters, and publication is accepted only from the
+scrubbed phase.  This is still a hosted protocol model rather than a claim
+about the QEMU device or VT-d completion machinery.
+-/
+
+inductive AssignedEDUReusePhase where
+  | oldLifetime
+  | released
+  | scrubbed
+  | freshPublished
+  deriving BEq, DecidableEq, Repr
+
+inductive AssignedEDUReuseCommand where
+  | release (guard : FrameReleaseGuard)
+  | scrub
+  | publishFresh
+  deriving DecidableEq, Repr
+
+structure AssignedEDUReuseStep where
+  phase : AssignedEDUReusePhase
+  accepted : Bool
+  deriving DecidableEq, Repr
+
+def advanceAssignedEDUReuse
+    (phase : AssignedEDUReusePhase) : AssignedEDUReuseCommand → AssignedEDUReuseStep
+  | .release .allowed =>
+      if phase == .oldLifetime then { phase := .released, accepted := true }
+      else { phase, accepted := false }
+  | .release _ => { phase, accepted := false }
+  | .scrub =>
+      if phase == .released then { phase := .scrubbed, accepted := true }
+      else { phase, accepted := false }
+  | .publishFresh =>
+      if phase == .scrubbed then { phase := .freshPublished, accepted := true }
+      else { phase, accepted := false }
+
+def runAssignedEDUReuse
+    (commands : List AssignedEDUReuseCommand) : AssignedEDUReuseStep :=
+  commands.foldl (fun state command =>
+    let next := advanceAssignedEDUReuse state.phase command
+    { phase := next.phase, accepted := state.accepted && next.accepted })
+    { phase := .oldLifetime, accepted := true }
+
+private def assignedEDUReuseGuardFromCode : UInt64 → FrameReleaseGuard
+  | 0 => .allowed
+  | 1 => .invalidationPending
+  | 2 => .mappingLive
+  | 3 => .cachedTranslationLive
+  | _ => .missingAuthority
+
+private def assignedEDUReuseCommands
+    (guardCode sequence : UInt64) : List AssignedEDUReuseCommand :=
+  let release := AssignedEDUReuseCommand.release
+    (assignedEDUReuseGuardFromCode guardCode)
+  if sequence = 0 then [release, .scrub, .publishFresh]
+  else if sequence = 1 then [.scrub, release, .publishFresh]
+  else if sequence = 2 then [release, .publishFresh, .scrub]
+  else [release]
+
+def assignedEDUReuseFreshPublicationModel
+    (guardCode sequence : UInt64) : UInt64 :=
+  let result := runAssignedEDUReuse
+    (assignedEDUReuseCommands guardCode sequence)
+  if guardCode != 0 then 1
+  else if !result.accepted then 2
+  else if result.phase != .freshPublished then 3
+  else 0
+
+@[export leanos_assigned_edu_reuse_fresh_publication]
+def assignedEDUReuseFreshPublicationExport
+    (guardCode sequence : UInt64) : UInt64 :=
+  if guardCode != 0 then 1
+  else if sequence = 1 || sequence = 2 then 2
+  else if sequence != 0 then 3
+  else 0
+
+theorem assigned_edu_reuse_fresh_publication_regressions :
+    assignedEDUReuseFreshPublicationExport 0 0 = 0 ∧
+      assignedEDUReuseFreshPublicationExport 1 0 = 1 ∧
+      assignedEDUReuseFreshPublicationExport 2 0 = 1 ∧
+      assignedEDUReuseFreshPublicationExport 3 0 = 1 ∧
+      assignedEDUReuseFreshPublicationExport 0 1 = 2 ∧
+      assignedEDUReuseFreshPublicationExport 0 2 = 2 ∧
+      assignedEDUReuseFreshPublicationExport 0 3 = 3 := by
+  native_decide
+
+theorem assigned_edu_reuse_fresh_publication_export_agrees_with_model :
+    assignedEDUReuseFreshPublicationExport 0 0 =
+        assignedEDUReuseFreshPublicationModel 0 0 ∧
+      assignedEDUReuseFreshPublicationExport 1 0 =
+        assignedEDUReuseFreshPublicationModel 1 0 ∧
+      assignedEDUReuseFreshPublicationExport 2 0 =
+        assignedEDUReuseFreshPublicationModel 2 0 ∧
+      assignedEDUReuseFreshPublicationExport 3 0 =
+        assignedEDUReuseFreshPublicationModel 3 0 ∧
+      assignedEDUReuseFreshPublicationExport 0 1 =
+        assignedEDUReuseFreshPublicationModel 0 1 ∧
+      assignedEDUReuseFreshPublicationExport 0 2 =
+        assignedEDUReuseFreshPublicationModel 0 2 ∧
+      assignedEDUReuseFreshPublicationExport 0 3 =
+        assignedEDUReuseFreshPublicationModel 0 3 := by
+  native_decide
+
+/-! ## Authoritative release-to-scrub composition
+
+The hosted phase machine above is not itself the allocator.  The theorem
+below connects its successful row to the two real model boundaries: an
+accepted `gatedCachedMemoryByKernel` release (which can only have passed the
+exact cache-aware guard) and the subsequent `FrameScrub.allocate` transition
+(which atomically clears the selected frame before publishing its new
+lifetime).  Thus the abstract `released -> scrubbed -> freshPublished` path is
+justified by authoritative outcomes rather than caller-provided success bits.
+-/
+
+theorem cached_release_then_allocation_orders_fresh_publication
+    (state : AuthoritativeCacheState)
+    (hstate : state.authoritative.Invariant)
+    (oldSubject : FrameScrub.SubjectId)
+    (oldSlot : FrameScrub.SlotId)
+    (freshObject : FrameScrub.ObjectId)
+    (freshSubject : FrameScrub.SubjectId)
+    (freshSlot : FrameScrub.SlotId)
+    (hrelease :
+      (gatedCachedMemoryByKernel state hstate
+        (.release oldSubject oldSlot)).isAccepted = true)
+    (hallocate :
+      (FrameScrub.allocate
+        (gatedCachedMemoryByKernel state hstate
+          (.release oldSubject oldSlot)).state.authoritative.scrub
+        freshObject freshSubject freshSlot).result = .accepted) :
+    let released := advanceAssignedEDUReuse .oldLifetime
+      (.release (guardFrameRelease state oldSubject oldSlot))
+    let scrubbed := advanceAssignedEDUReuse released.phase .scrub
+    let published := advanceAssignedEDUReuse scrubbed.phase .publishFresh
+    released.accepted = true ∧
+      scrubbed.accepted = true ∧
+      published.accepted = true ∧
+      published.phase = .freshPublished ∧
+      FrameScrub.Fresh
+        (FrameScrub.allocate
+          (gatedCachedMemoryByKernel state hstate
+            (.release oldSubject oldSlot)).state.authoritative.scrub
+          freshObject freshSubject freshSlot).state
+        freshObject := by
+  have hguard := cached_release_accepted_requires_guard_allowed
+    state hstate oldSubject oldSlot hrelease
+  have hfresh := FrameScrub.allocation_publishes_scrubbed
+    (gatedCachedMemoryByKernel state hstate
+      (.release oldSubject oldSlot)).state.authoritative.scrub
+    freshObject freshSubject freshSlot hallocate
+  dsimp only
+  rw [hguard]
+  refine ⟨?_, ?_, ?_, ?_, hfresh⟩ <;> native_decide
+
+/-- The controlled assigned-EDU call-order row cannot jump from a caller's
+completion bit directly to fresh publication.  Its cache premise is the exact
+state produced by preparing and acknowledging the assigned-EDU mapping
+invalidation; an accepted release then supplies authoritative capability
+resolution and the exact-frame guard, and the real allocator supplies the
+scrubbed fresh lifetime.  This remains a model/hosted boundary and does not
+claim VT-d completion or QEMU refinement. -/
+theorem assigned_edu_completion_release_allocation_orders_fresh_publication
+    (state : AuthoritativeCacheState)
+    (hstate : state.authoritative.Invariant)
+    (oldSubject : FrameScrub.SubjectId)
+    (oldSlot : FrameScrub.SlotId)
+    (freshObject : FrameScrub.ObjectId)
+    (freshSubject : FrameScrub.SubjectId)
+    (freshSlot : FrameScrub.SlotId)
+    (hcache :
+      state.cache =
+        (acknowledgeInvalidation
+          (prepareInvalidation assignedEDUReuseInitial
+            (.mapping assignedEDUReuseKey)).state
+          { ticket := 1, scope := .mapping assignedEDUReuseKey }).state)
+    (hrelease :
+      (gatedCachedMemoryByKernel state hstate
+        (.release oldSubject oldSlot)).isAccepted = true)
+    (hresolveAssigned :
+      resolveReleaseFrame state oldSubject oldSlot =
+        some assignedEDUReuseEntry.frame)
+    (hallocate :
+      (FrameScrub.allocate
+        (gatedCachedMemoryByKernel state hstate
+          (.release oldSubject oldSlot)).state.authoritative.scrub
+        freshObject freshSubject freshSlot).result = .accepted)
+    (hreuseAssigned :
+      (FrameScrub.allocate
+        (gatedCachedMemoryByKernel state hstate
+          (.release oldSubject oldSlot)).state.authoritative.scrub
+        freshObject freshSubject freshSlot).state.memory.binding freshObject =
+          some assignedEDUReuseEntry.frame.frame) :
+    state.cache.pending = none ∧
+      lookup state.cache.published assignedEDUReuseKey = none ∧
+      resolveReleaseFrame state oldSubject oldSlot =
+        some assignedEDUReuseEntry.frame ∧
+      guardExactFrameRelease state assignedEDUReuseEntry.frame = .allowed ∧
+      (FrameScrub.allocate
+        (gatedCachedMemoryByKernel state hstate
+          (.release oldSubject oldSlot)).state.authoritative.scrub
+        freshObject freshSubject freshSlot).state.memory.binding freshObject =
+          some assignedEDUReuseEntry.frame.frame ∧
+      assignedEDUReuseFreshPublicationExport 0 0 = 0 ∧
+      FrameScrub.Fresh
+        (FrameScrub.allocate
+          (gatedCachedMemoryByKernel state hstate
+            (.release oldSubject oldSlot)).state.authoritative.scrub
+          freshObject freshSubject freshSlot).state
+        freshObject := by
+  have hresolved := cached_release_accepted_resolves_guarded_frame
+    state hstate oldSubject oldSlot hrelease
+  obtain ⟨frame, hresolve, hguard⟩ := hresolved
+  rw [hresolveAssigned] at hresolve
+  injection hresolve with hframe
+  subst frame
+  have hfresh := FrameScrub.allocation_publishes_scrubbed
+    (gatedCachedMemoryByKernel state hstate
+      (.release oldSubject oldSlot)).state.authoritative.scrub
+    freshObject freshSubject freshSlot hallocate
+  refine ⟨?_, ?_, hresolveAssigned, hguard, hreuseAssigned,
+    by native_decide, hfresh⟩
+  · rw [hcache]
+    native_decide
+  · rw [hcache]
+    native_decide
+
+/-- Allocation acceptance alone cannot establish assigned-frame reuse: an
+earlier unrelated free frame wins the allocator's deterministic first-free
+selection.  The composition theorem therefore requires and publishes the
+exact fresh-object binding to the assigned EDU frame. -/
+private def assignedEDUEarlierFreeAllocator : FrameAllocator.State := {
+  frames := [1, assignedEDUReuseEntry.frame.frame]
+  status := fun _ => .free }
+
+private def assignedEDUEarlierFreeSelection : Option FrameAllocator.FrameId :=
+  match FrameAllocator.allocate assignedEDUEarlierFreeAllocator 99 with
+  | .ok allocation => some allocation.frame
+  | .error _ => none
+
+theorem assigned_edu_reuse_rejects_unbound_allocation_regression :
+    assignedEDUEarlierFreeSelection = some 1 ∧
+      assignedEDUEarlierFreeSelection ≠
+        some assignedEDUReuseEntry.frame.frame := by
   native_decide
 
 /-! ## Fixed-width hosted invalidation sequence
