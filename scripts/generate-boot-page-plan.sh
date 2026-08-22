@@ -4,8 +4,20 @@ set -euo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
+install_if_changed() {
+  local staged="$1" destination="$2"
+  if [[ -f "$destination" ]] && cmp -s "$staged" "$destination"; then
+    rm "$staged"
+  else
+    mv "$staged" "$destination"
+  fi
+}
+
 if [[ "${1:-}" == --stub ]]; then
-  output="${2:?usage: $0 --stub OUTPUT}"
+  destination="${2:?usage: $0 --stub OUTPUT}"
+  mkdir -p "$(dirname "$destination")"
+  output="$(mktemp "${destination}.tmp.XXXXXX")"
+  trap 'rm -f "$output"' EXIT
   {
     echo '/* Fixed-size prelink placeholder; replaced by the accepted Lean plan. */'
     echo 'static const unsigned long long leanos_boot_plan_a[4096] = {'
@@ -89,6 +101,8 @@ if [[ "${1:-}" == --stub ]]; then
     for ((word = 2; word < 512; ++word)); do echo '  0ULL,'; done
     echo '};'
   } > "$output"
+  install_if_changed "$output" "$destination"
+  trap - EXIT
   exit 0
 fi
 
@@ -98,8 +112,35 @@ if [[ "${1:-}" == --assigned-edu ]]; then
   shift
 fi
 elf="${1:?usage: $0 [--assigned-edu] ELF OUTPUT}"
-output="${2:?usage: $0 [--assigned-edu] ELF OUTPUT}"
+destination="${2:?usage: $0 [--assigned-edu] ELF OUTPUT}"
+mkdir -p "$(dirname "$destination")"
+output="$(mktemp "${destination}.tmp.XXXXXX")"
+trap 'rm -f "$output"' EXIT
 [[ -f "$elf" ]] || { echo "error: missing prelinked ELF '$elf'" >&2; exit 1; }
+
+# The image wrapper invokes this generator for every image variant. Avoid
+# replaying both Lean executables when neither the ELF nor the generator/tool
+# identity changed. The wrapper supplies the content signature it already
+# computes over all Lean sources, Lake inputs, and the resolved Lean binary.
+tool_signature="${LEANOS_BOOT_PLAN_TOOL_SIGNATURE:-}"
+if [[ -n "$tool_signature" ]]; then
+  stage_key="$(printf '%s\0%s\0' "$elf" "$assigned_edu" | sha256sum | awk '{print $1}')"
+  signature="$({
+    sha256sum "$elf" "$root/scripts/generate-boot-page-plan.sh"
+    printf '%s\n' "$assigned_edu" "$tool_signature"
+  } | sha256sum | awk '{print $1}')"
+  signature_file="${destination}.inputs.${stage_key}.sha256"
+  if [[ -f "$destination" && -f "$signature_file" ]] &&
+      read -r stored_signature stored_output_hash < "$signature_file" &&
+      [[ "$stored_signature" == "$signature" ]]; then
+    current_output_hash="$(sha256sum "$destination" | awk '{print $1}')"
+    if [[ "$current_output_hash" == "$stored_output_hash" ]]; then
+      rm "$output"
+      trap - EXIT
+      exit 0
+    fi
+  fi
+fi
 
 symbol_decimal() {
   local name="$1" hex
@@ -144,3 +185,9 @@ for name in "${vtd_symbols[@]}"; do vtd_args+=("$(symbol_decimal "$name")"); don
 
 lake exe leanos-boot-plan "${args[@]}" > "$output"
 lake exe leanos-vtd-plan "${vtd_args[@]}" >> "$output"
+install_if_changed "$output" "$destination"
+if [[ -n "$tool_signature" ]]; then
+  output_hash="$(sha256sum "$destination" | awk '{print $1}')"
+  printf '%s %s\n' "$signature" "$output_hash" > "$signature_file"
+fi
+trap - EXIT
