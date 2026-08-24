@@ -1878,6 +1878,278 @@ noncomputable def canonicalDMAMemorySubtreeCheckedIOMMUAfter
           (FailStop.compositeDispatcherInitial plan).capabilities 2 2 2 2
           (authoritativeSampleIOMMU plan).capabilityWellFormed }
 
+/-- Proof-only composite-kernel projection for the checked raw subtree
+successor.  This mirrors capability publication into every kernel consumer,
+but remains local to the coordinated cleanup candidate: it is not an ordinary
+operation and cannot publish independently of the IOMMU cleanup protocol. -/
+noncomputable def canonicalDMAMemorySubtreeKernelAfter
+    (plan : BootPageTablePlan.Plan) : FailStop.CompositeState :=
+  let before := (subjectTerminationCheckedBefore plan).kernel
+  let capabilities := (canonicalDMAMemorySubtreeRawAfter plan).state
+  let lifecycle := { before.lifecycle with capabilities }
+  let scheduler := { before.scheduler with lifecycle }
+  let virtualMemory := { before.virtualMemory with
+    memory := { before.virtualMemory.memory with capabilities } }
+  let endpoints := { before.ipc.endpoints with capabilities }
+  { before with
+    execution := { before.execution with
+      core := { before.execution.core with lifecycle }
+      returnAuthorityArmed := false }
+    scheduler
+    preemption := { before.preemption with scheduler }
+    virtualMemory
+    ipc := { before.ipc with virtualMemory, endpoints }
+    capabilities
+    lifecycle
+    resumable := { before.resumable with
+      scheduler
+      translations := { before.resumable.translations with
+        virtual := virtualMemory } }
+    transfers := { before.transfers with toEndpointState := endpoints }
+    blockingIPC := { before.blockingIPC with scheduler } }
+
+/-- Every overlapping kernel view receives the exact raw successor derived
+from the authoritative pre-state.  No consumer can retain the revoked root
+while another observes its removal. -/
+theorem canonical_dma_memory_subtree_kernel_after_synchronizes_capabilities
+    (plan : BootPageTablePlan.Plan) :
+    let capabilities := (canonicalDMAMemorySubtreeRawAfter plan).state
+    let after := canonicalDMAMemorySubtreeKernelAfter plan
+    after.capabilities = capabilities ∧
+      after.lifecycle.capabilities = capabilities ∧
+      after.execution.core.lifecycle.capabilities = capabilities ∧
+      after.virtualMemory.memory.capabilities = capabilities ∧
+      after.ipc.endpoints.capabilities = capabilities ∧
+      after.scheduler.lifecycle.capabilities = capabilities ∧
+      after.preemption.scheduler.lifecycle.capabilities = capabilities ∧
+      after.resumable.scheduler.lifecycle.capabilities = capabilities ∧
+      after.transfers.capabilities = capabilities := by
+  simp [canonicalDMAMemorySubtreeKernelAfter]
+
+/-- The scrub projection receives the same capability successor without
+changing bytes, bindings, allocator ownership, or write history. -/
+noncomputable def canonicalDMAMemorySubtreeScrubAfter
+    (plan : BootPageTablePlan.Plan) : FrameScrub.State :=
+  let before := (subjectTerminationCheckedBefore plan).scrub
+  { before with memory := { before.memory with
+      capabilities := (canonicalDMAMemorySubtreeRawAfter plan).state } }
+
+/-- Proof-only logical candidate for the coordinated memory-subtree cleanup.
+It installs the internally derived capability successor in the kernel, memory,
+scrub, and validated IOMMU projections, but remains deliberately outside the
+publication front door until complete coherence is proved.
+-/
+noncomputable def canonicalDMAMemorySubtreeCleanupCandidate
+    (plan : BootPageTablePlan.Plan) : AuthoritativeExtension :=
+  { kernel := canonicalDMAMemorySubtreeKernelAfter plan
+    iommu := canonicalDMAMemorySubtreeCheckedIOMMUAfter plan
+    scrub := canonicalDMAMemorySubtreeScrubAfter plan }
+
+/-- The coordinated candidate has one exact capability successor across the
+outer kernel, virtual-memory, scrub, and IOMMU authority projections. -/
+theorem canonical_dma_memory_subtree_cleanup_candidate_capabilities_coherent
+    (plan : BootPageTablePlan.Plan) :
+    let capabilities := (canonicalDMAMemorySubtreeRawAfter plan).state
+    let after := canonicalDMAMemorySubtreeCleanupCandidate plan
+    after.kernel.capabilities = capabilities ∧
+      after.kernel.virtualMemory.memory.capabilities = capabilities ∧
+      after.scrub.memory.capabilities = capabilities ∧
+      after.iommu.core.capabilityAuthority = capabilities := by
+  simp [canonicalDMAMemorySubtreeCleanupCandidate,
+    canonicalDMAMemorySubtreeKernelAfter,
+    canonicalDMAMemorySubtreeScrubAfter,
+    canonicalDMAMemorySubtreeCheckedIOMMUAfter,
+    canonicalDMAMemorySubtreeCheckedCoreAfter]
+
+/-- The proof-only coordinated successor satisfies the complete outer
+cross-projection coherence predicate.  This closes the state-construction
+obligation while leaving publication and exact-completion ordering separate. -/
+theorem canonical_dma_memory_subtree_cleanup_candidate_coherent
+    (plan : BootPageTablePlan.Plan) :
+    (canonicalDMAMemorySubtreeCleanupCandidate plan).Coherent := by
+  have hscrub : FrameScrub.ScrubInvariant
+      (canonicalDMAMemorySubtreeCleanupCandidate plan).scrub := by
+    intro object frame hbinding hunwritten
+    apply authoritativeSampleScrub_invariant plan object frame
+    · simpa [canonicalDMAMemorySubtreeCleanupCandidate,
+        canonicalDMAMemorySubtreeScrubAfter,
+        subjectTerminationCheckedBefore,
+        authoritativeSample] using hbinding
+    · simpa [canonicalDMAMemorySubtreeCleanupCandidate,
+        canonicalDMAMemorySubtreeScrubAfter,
+        subjectTerminationCheckedBefore,
+        authoritativeSample] using hunwritten
+  rw [AuthoritativeExtension.Coherent]
+  refine ⟨?_, ?_, ?_, ?_, hscrub, ?_, ?_, ?_, ?_⟩ <;>
+    simp [canonicalDMAMemorySubtreeCleanupCandidate,
+      canonicalDMAMemorySubtreeKernelAfter,
+      canonicalDMAMemorySubtreeScrubAfter,
+      canonicalDMAMemorySubtreeCheckedIOMMUAfter,
+      canonicalDMAMemorySubtreeCheckedCoreAfter,
+      canonicalDMAMemorySubtreeRawAfter,
+      LeanOS.Capability.revokeSubtree,
+      LeanOS.Capability.lookup,
+      subjectTerminationCheckedBefore,
+      subjectTerminationCheckedIOMMU,
+      subjectTerminationCheckedCore,
+      authoritativeSample, authoritativeSampleCore,
+      authoritativeSampleScrub,
+      FailStop.compositeDispatcherInitial]
+  all_goals native_decide
+
+/-- The kernel-facing capability projection retains the raw transition's
+machine-checked provenance.  This exposes the exact capability sub-obligation
+needed by the complete runtime invariant without asserting that the
+coordinated candidate has crossed the publication boundary. -/
+theorem canonical_dma_memory_subtree_kernel_after_capabilities_well_formed
+    (plan : BootPageTablePlan.Plan) :
+    LeanOS.Capability.WellFormed
+      (canonicalDMAMemorySubtreeKernelAfter plan).capabilities := by
+  simpa [canonicalDMAMemorySubtreeKernelAfter,
+    canonicalDMAMemorySubtreeRawAfter] using
+    LeanOS.Capability.revokeSubtree_preserves_wellFormed
+      (FailStop.compositeDispatcherInitial plan).capabilities 2 2 2 2
+      (authoritativeSampleIOMMU plan).capabilityWellFormed
+
+/-- Coordinating the capability successor changes no deferred-cancellation or
+invalidation-publication state.  These authority-bearing runtime projections
+remain exactly the checked pre-state's values while the candidate waits for
+the cleanup publication protocol. -/
+theorem canonical_dma_memory_subtree_kernel_after_retains_runtime_authority
+    (plan : BootPageTablePlan.Plan) :
+    let before := (subjectTerminationCheckedBefore plan).kernel
+    let after := canonicalDMAMemorySubtreeKernelAfter plan
+    after.deferredCancels = before.deferredCancels ∧
+      after.invalidationPublication = before.invalidationPublication := by
+  simp [canonicalDMAMemorySubtreeKernelAfter,
+    subjectTerminationCheckedBefore, authoritativeSample]
+
+/-- The synchronized successor retains every non-slot capability registry and
+every surviving slot comes from the pre-state.  These are the exact metadata
+and sealed-identity premises consumed by the runtime publication boundary;
+the coordinated cleanup still needs a public theorem for its deliberately
+runtime-unsafe raw subtree transition. -/
+theorem canonical_dma_memory_subtree_kernel_after_retains_capability_metadata
+    (plan : BootPageTablePlan.Plan) :
+    let before := (subjectTerminationCheckedBefore plan).kernel.capabilities
+    let after := (canonicalDMAMemorySubtreeKernelAfter plan).capabilities
+    after.subjects = before.subjects ∧
+      after.objects = before.objects ∧
+      after.kinds = before.kinds ∧
+      after.slotCapacity = before.slotCapacity ∧
+      after.nextIdentity = before.nextIdentity ∧
+      after.derivations = before.derivations ∧
+      (∀ subject slot capability,
+        after.slots subject slot = some capability →
+          before.slots subject slot = some capability) := by
+  have hmetadata := LeanOS.Capability.revokeSubtree_preserves_metadata
+    (FailStop.compositeDispatcherInitial plan).capabilities 2 2 2 2
+  have hslots : ∀ subject slot capability,
+      (canonicalDMAMemorySubtreeRawAfter plan).state.slots subject slot =
+          some capability →
+        (FailStop.compositeDispatcherInitial plan).capabilities.slots subject slot =
+          some capability := by
+    intro subject slot capability hslot
+    exact LeanOS.Capability.revokeSubtree_slot_survives
+      (FailStop.compositeDispatcherInitial plan).capabilities 2 2 2 2
+      subject slot capability hslot
+  rcases hmetadata with
+    ⟨hsubjects, hobjects, hkinds, hcapacity, hnextIdentity, hderivations⟩
+  simpa [canonicalDMAMemorySubtreeKernelAfter,
+    canonicalDMAMemorySubtreeRawAfter,
+    subjectTerminationCheckedBefore, authoritativeSample] using
+    ⟨hsubjects, hobjects, hkinds, hcapacity, hnextIdentity, hderivations, hslots⟩
+
+/-- The current proof-only candidate cannot cross the checked capability-only
+publication boundary: it removes subject 2's sole read authority for the live
+memory object while the surrounding lifecycle still names that ownership.
+This negative theorem prevents the coordinated cleanup from being completed
+by weakening the generic revocation contract; the publication successor must
+instead retire the dependent lifecycle projections in the same checked step. -/
+theorem canonical_dma_memory_subtree_kernel_after_does_not_preserve_runtime_authority
+    (plan : BootPageTablePlan.Plan) :
+    ¬ FailStop.RuntimeAuthorityPreserved
+      (subjectTerminationCheckedBefore plan).kernel.capabilities
+      (canonicalDMAMemorySubtreeKernelAfter plan).capabilities := by
+  intro hpreserved
+  have hbefore : LeanOS.Capability.HasAuthority
+      (subjectTerminationCheckedBefore plan).kernel.capabilities 2 20 .read := by
+    have hvalid := (subjectTerminationCheckedIOMMU plan).valid
+    change validateCore (subjectTerminationCheckedCore plan) = true at hvalid
+    have hcapabilities :
+        (subjectTerminationCheckedCore plan).capabilities.all
+          (capabilityValid (subjectTerminationCheckedCore plan)) = true := by
+      unfold validateCore at hvalid
+      simp only [Bool.and_eq_true] at hvalid
+      grind
+    have hcapability := hcapabilities
+    simp [subjectTerminationCheckedCore, authoritativeSampleCore,
+      capabilityValid, findFrame, readWrite, Permission.nonempty,
+      rangeContained] at hcapability
+    change LeanOS.Capability.HasAuthority
+      (FailStop.compositeDispatcherInitial plan).capabilities 2 20 .read
+    cases hlookup : LeanOS.Capability.lookup
+        (FailStop.compositeDispatcherInitial plan).capabilities 2 2 with
+    | invalidSubject => simp [hlookup] at hcapability
+    | staleSlot => simp [hlookup] at hcapability
+    | found capability =>
+        refine ⟨2, capability,
+          LeanOS.Capability.lookup_found_slot _ _ _ _ hlookup, ?_, ?_⟩
+        · simp [hlookup] at hcapability
+          grind
+        · simp [hlookup] at hcapability
+          simp [LeanOS.Capability.hasRight, LeanOS.Capability.permits]
+          grind
+  have hafter := hpreserved 2 20 .read (Or.inl rfl) hbefore
+  rcases hafter with ⟨slot, capability, hslot, hobject, hread⟩
+  have hbeforeSlot := LeanOS.Capability.revokeSubtree_slot_survives
+    (FailStop.compositeDispatcherInitial plan).capabilities 2 2 2 2
+    2 slot capability (by
+      simpa [canonicalDMAMemorySubtreeKernelAfter,
+        canonicalDMAMemorySubtreeRawAfter] using hslot)
+  have hslotEq := FailStop.compositeDispatcherInitial_subjectTwo_memory_read_slot
+    plan slot capability hbeforeSlot hobject hread
+  subst slot
+  have hremoved := (canonical_dma_memory_raw_subtree_derives_successor plan).2
+  have hstill : (canonicalDMAMemorySubtreeRawAfter plan).state.slots 2 2 =
+      some capability := by
+    simpa [canonicalDMAMemorySubtreeKernelAfter,
+      canonicalDMAMemorySubtreeRawAfter] using hslot
+  simp [hremoved] at hstill
+
+/-- The coordinated capability/IOMMU candidate deliberately leaves subject
+2's live lifecycle and address-space ownership in place.  These concrete
+facts identify the next publication obligation: the authoritative successor
+must retire the dependent runtime owner together with the revoked memory
+authority, rather than weakening the capability-only publisher. -/
+theorem canonical_dma_memory_subtree_cleanup_candidate_retains_live_owner
+    (plan : BootPageTablePlan.Plan) :
+    let after := (canonicalDMAMemorySubtreeCleanupCandidate plan).kernel
+    after.lifecycle.capabilities.subjects 2 = true ∧
+      after.lifecycle.addressOwner 2 = some 2 := by
+  simp [canonicalDMAMemorySubtreeCleanupCandidate,
+    canonicalDMAMemorySubtreeKernelAfter,
+    canonicalDMAMemorySubtreeRawAfter,
+    subjectTerminationCheckedBefore, authoritativeSample,
+    FailStop.compositeDispatcherInitial]
+  native_decide
+
+/-- The validated IOMMU state and complete cross-projection coherence are
+already discharged.  Consequently the sole remaining obligation for the
+coordinated candidate's full outer invariant is the kernel runtime invariant;
+callers cannot substitute a weaker IOMMU or coherence premise. -/
+theorem canonical_dma_memory_subtree_cleanup_candidate_invariant_iff_runtime
+    (plan : BootPageTablePlan.Plan) :
+    (canonicalDMAMemorySubtreeCleanupCandidate plan).Invariant ↔
+      FailStop.AuthoritativeRuntimeWellFormed
+        (canonicalDMAMemorySubtreeCleanupCandidate plan).kernel := by
+  constructor
+  · exact fun hinvariant => hinvariant.1
+  · intro hruntime
+    exact ⟨hruntime,
+      (canonicalDMAMemorySubtreeCleanupCandidate plan).iommu.invariant,
+      canonical_dma_memory_subtree_cleanup_candidate_coherent plan⟩
+
 /-- The concrete live assignment/mapping projection is coherent with the
 canonical kernel, capability, frame-binding, and scrub projections. -/
 theorem subject_termination_checked_before_invariant
@@ -2079,7 +2351,7 @@ theorem subject_termination_checked_reconcile_candidate_valid
     rfl
   have hremoved :
       (subjectTerminationCheckedKernelAfter plan).capabilities.subjects 2 = false := by
-    simpa [subjectTerminationCheckedKernelAfter] using
+    simpa only [subjectTerminationCheckedKernelAfter] using
       executable_subject_termination_checked_kernel_removes_owner plan
   simp [subjectTerminationCheckedReconcileCandidate, hcurrent, hremoved,
     subjectTerminationCheckedBefore,
@@ -2311,6 +2583,75 @@ theorem subject_termination_checked_apply_removes_device_authority
   rw [subject_termination_checked_apply_eq_reconciled_candidate plan]
   exact subject_termination_checked_reconcile_removes_device_authority plan
 
+/-- The atomic outer publisher preserves the complete authoritative invariant,
+not merely the finite IOMMU validator.  This is the invariant-bearing
+successor that the proof-only raw capability candidate deliberately cannot
+provide while its old lifecycle owner remains live. -/
+theorem subject_termination_checked_after_invariant
+    (plan : BootPageTablePlan.Plan) :
+    (subjectTerminationCheckedAfter plan).Invariant := by
+  exact kernel_operation_preserves_authoritative_extension
+    (subjectTerminationCheckedBefore plan)
+    (.ordinary (.terminateSubject 2))
+    (subject_termination_checked_before_invariant plan)
+
+/-- One checked publication retires the old runtime owner and both device
+authority inventories while preserving the complete outer invariant.  The
+successor is derived by the ordinary termination gate and reconciliation
+validators; no caller supplies a lifecycle, capability, or IOMMU post-state. -/
+theorem subject_termination_checked_atomic_publication_retires_owner
+    (plan : BootPageTablePlan.Plan) :
+    let after := subjectTerminationCheckedAfter plan
+    after.Invariant ∧
+      after.kernel.lifecycle.capabilities.subjects 2 = false ∧
+      after.kernel.lifecycle.addressOwner 2 = none ∧
+      after.iommu.core.assignments = [] ∧
+      after.iommu.core.mappings = [] := by
+  have hinvariant := subject_termination_checked_after_invariant plan
+  have hremoved := subject_termination_checked_apply_removes_device_authority plan
+  refine ⟨hinvariant, ?_, ?_, hremoved.1, hremoved.2⟩
+  · rw [subject_termination_checked_apply_eq_reconciled_candidate plan]
+    change
+      (subjectTerminationCheckedKernelAfter plan).lifecycle.capabilities.subjects
+          2 = false
+    have hpost :=
+      (FailStop.authoritativeGate_preserves_authoritativeRuntimeWellFormed
+        (subjectTerminationCheckedBefore plan).kernel
+        (.ordinary (.terminateSubject 2))
+        (subject_termination_checked_before_invariant plan).1)
+    have hcoherent := hpost.left.left
+    have hprojection :
+        (subjectTerminationCheckedKernelAfter plan).capabilities =
+          (subjectTerminationCheckedKernelAfter plan).lifecycle.capabilities := by
+      simpa only [subjectTerminationCheckedKernelAfter] using hcoherent.2.2.2.1
+    rw [← hprojection]
+    exact executable_subject_termination_checked_kernel_removes_owner plan
+  · rw [subject_termination_checked_apply_eq_reconciled_candidate plan]
+    change (subjectTerminationCheckedKernelAfter plan).lifecycle.addressOwner
+      2 = none
+    have hstate :=
+      FailStop.compositeDispatcherInitial_authoritativeRuntimeWellFormed plan
+    have hmode :
+        (FailStop.compositeDispatcherInitial plan).execution.mode = .running := by
+      rfl
+    let terminated := SubjectLifecycle.terminate
+      (FailStop.compositeDispatcherInitial plan).lifecycle 2
+    have haccepted : terminated.result = .accepted := by
+      simp [terminated, FailStop.compositeDispatcherInitial]
+      native_decide
+    rcases hterminated : terminated with ⟨lifecycle, result⟩
+    have hrecord :
+        SubjectLifecycle.terminate
+            (FailStop.compositeDispatcherInitial plan).lifecycle 2 =
+          { state := lifecycle, result := .accepted } := by
+      simpa [terminated, hterminated] using haccepted
+    have haddress :=
+      FailStop.terminateSubject_accepted_removes_owned_address_spaces
+        (FailStop.compositeDispatcherInitial plan) 2 lifecycle hstate.1 hmode
+        hrecord 2 (by rfl)
+    simpa [subjectTerminationCheckedKernelAfter,
+      subjectTerminationCheckedBefore, authoritativeSample] using haddress
+
 /-- The checked outer operation has exactly the two branches exposed by the
 coherence gate: it either stutters to the complete pre-state, or publishes the
 validated reconciliation whose assignment and mapping inventories are empty.
@@ -2346,6 +2687,20 @@ theorem subject_termination_checked_removed_authority_scopes
     subjectTerminationWitnessScopes, subjectTerminationWitnessAssignment,
     subjectTerminationWitnessMapping]
   native_decide
+
+/-- The coordinated raw capability/IOMMU successor induces the complete
+mapping-plus-assignment invalidation inventory.  Both scopes are computed from
+the published pre-state and the validated successor; neither is accepted from
+a completion or another caller-provided list. -/
+theorem canonical_dma_memory_subtree_cleanup_candidate_scopes
+    (plan : BootPageTablePlan.Plan) :
+    requiredAuthorityCleanupScopes
+      (subjectTerminationCheckedBefore plan)
+      (canonicalDMAMemorySubtreeCleanupCandidate plan) =
+        subjectTerminationWitnessScopes := by
+  apply subject_termination_checked_removed_authority_scopes plan
+  · rfl
+  · rfl
 
 /-! ## Checked end-to-end cleanup publication
 
@@ -2477,6 +2832,28 @@ theorem subject_termination_checked_authoritative_acknowledges_exact_cleanup
     invalidateScopes, scopeCoversKey]
   all_goals native_decide
 
+/-- Exact cleanup acknowledgement publishes an invariant-bearing
+authoritative successor.  This connects the caller-visible completion result
+to the complete kernel, IOMMU, scrub, and cross-projection invariant rather
+than relying only on the finite cache and pending-slot observations. -/
+theorem subject_termination_checked_authoritative_exact_completion_invariant
+    (plan : BootPageTablePlan.Plan) :
+    let prepared := prepareAuthoritativePublication
+      (subjectTerminationCheckedAuthoritativePublicationState plan)
+      (subject_termination_checked_before_invariant plan)
+      (.cleanup (.ordinary (.terminateSubject 2)))
+    let acknowledged := acknowledgeAuthoritativePublication prepared.state
+      (.cleanup subjectTerminationWitnessCompletion)
+    acknowledged.accepted = true ∧
+      acknowledged.state.authoritative.Invariant := by
+  have hexact :=
+    subject_termination_checked_authoritative_acknowledges_exact_cleanup plan
+  simp only at hexact ⊢
+  rcases hexact with ⟨haccepted, hauthoritative, _, _⟩
+  refine ⟨haccepted, ?_⟩
+  rw [hauthoritative]
+  exact subject_termination_checked_after_invariant plan
+
 /-- Preparation of the canonical subject-2 cleanup keeps every old authority
 projection published until the exact completion arrives.  In particular, the
 subject remains live, its DMA mapping remains authoritative, and the stale
@@ -2539,6 +2916,2225 @@ theorem subject_termination_checked_authoritative_exact_completion_removes_old_a
       executable_subject_termination_checked_kernel_removes_owner plan
   · simpa [hauthoritative] using hremoved.2
   · simp [hcache, lookup]
+
+/-- Exact caller-visible cleanup completion publishes the complete
+invariant-bearing retirement in one result: the old subject and address-space
+owner are gone, both device-authority inventories are empty, the stale
+translation is absent, and no cleanup ticket remains pending. -/
+theorem subject_termination_checked_authoritative_exact_completion_retires_all_authority
+    (plan : BootPageTablePlan.Plan) :
+    let prepared := prepareAuthoritativePublication
+      (subjectTerminationCheckedAuthoritativePublicationState plan)
+      (subject_termination_checked_before_invariant plan)
+      (.cleanup (.ordinary (.terminateSubject 2)))
+    let acknowledged := acknowledgeAuthoritativePublication prepared.state
+      (.cleanup subjectTerminationWitnessCompletion)
+    acknowledged.accepted = true ∧
+      acknowledged.state.authoritative.Invariant ∧
+      acknowledged.state.authoritative.kernel.lifecycle.capabilities.subjects 2 = false ∧
+      acknowledged.state.authoritative.kernel.lifecycle.addressOwner 2 = none ∧
+      acknowledged.state.authoritative.iommu.core.assignments = [] ∧
+      acknowledged.state.authoritative.iommu.core.mappings = [] ∧
+      lookup acknowledged.state.cache subjectTerminationWitnessKey = none ∧
+      acknowledged.state.pending = none := by
+  have hexact :=
+    subject_termination_checked_authoritative_acknowledges_exact_cleanup plan
+  have hretired :=
+    subject_termination_checked_atomic_publication_retires_owner plan
+  simp only at hexact hretired ⊢
+  rcases hexact with ⟨haccepted, hauthoritative, hcache, hpending⟩
+  rcases hretired with
+    ⟨hinvariant, hsubject, haddress, hassignments, hmappings⟩
+  refine ⟨haccepted, ?_, ?_, ?_, ?_, ?_, ?_, hpending⟩
+  · rw [hauthoritative]
+    exact hinvariant
+  · rw [hauthoritative]
+    exact hsubject
+  · rw [hauthoritative]
+    exact haddress
+  · rw [hauthoritative]
+    exact hassignments
+  · rw [hauthoritative]
+    exact hmappings
+  · simp [hcache, lookup]
+
+/-- Exact cleanup completion also closes every capability lookup for the
+retired owner.  The caller-visible result therefore couples the complete
+invariant with invalidation of all old subject slots, descendant DMA authority,
+the stale translation, and the pending cleanup ticket. -/
+theorem subject_termination_checked_authoritative_exact_completion_closes_grants
+    (plan : BootPageTablePlan.Plan) :
+    let prepared := prepareAuthoritativePublication
+      (subjectTerminationCheckedAuthoritativePublicationState plan)
+      (subject_termination_checked_before_invariant plan)
+      (.cleanup (.ordinary (.terminateSubject 2)))
+    let acknowledged := acknowledgeAuthoritativePublication prepared.state
+      (.cleanup subjectTerminationWitnessCompletion)
+    acknowledged.accepted = true ∧
+      acknowledged.state.authoritative.Invariant ∧
+      (∀ slot,
+        LeanOS.Capability.lookup
+          acknowledged.state.authoritative.kernel.capabilities 2 slot =
+            .invalidSubject) ∧
+      acknowledged.state.authoritative.iommu.core.assignments = [] ∧
+      acknowledged.state.authoritative.iommu.core.mappings = [] ∧
+      lookup acknowledged.state.cache subjectTerminationWitnessKey = none ∧
+      acknowledged.state.pending = none := by
+  have hretired :=
+    subject_termination_checked_authoritative_exact_completion_retires_all_authority
+      plan
+  simp only at hretired ⊢
+  rcases hretired with
+    ⟨haccepted, hinvariant, hsubject, _haddress, hassignments, hmappings,
+      hcache, hpending⟩
+  refine ⟨haccepted, hinvariant, ?_, hassignments, hmappings, hcache,
+    hpending⟩
+  have hprojection := hinvariant.1.left.left.2.2.2.1
+  have hkernelSubject :
+      (acknowledgeAuthoritativePublication
+              (prepareAuthoritativePublication
+                (subjectTerminationCheckedAuthoritativePublicationState plan)
+                (subject_termination_checked_before_invariant plan)
+                (.cleanup (.ordinary (.terminateSubject 2)))).state
+              (.cleanup subjectTerminationWitnessCompletion)).state.authoritative.kernel.capabilities.subjects
+          2 = false := by
+    rw [hprojection]
+    exact hsubject
+  intro slot
+  simp [LeanOS.Capability.lookup, hkernelSubject]
+
+/-- Exact caller-visible cleanup completion also opens the frame-lifetime
+guard for the retired DMA frame.  This result uses the acknowledged
+authoritative successor and published cache directly: no caller-provided
+claim about mapping or translation absence can make the guard succeed. -/
+theorem subject_termination_checked_authoritative_exact_completion_opens_frame_guard
+    (plan : BootPageTablePlan.Plan) :
+    let prepared := prepareAuthoritativePublication
+      (subjectTerminationCheckedAuthoritativePublicationState plan)
+      (subject_termination_checked_before_invariant plan)
+      (.cleanup (.ordinary (.terminateSubject 2)))
+    let acknowledged := acknowledgeAuthoritativePublication prepared.state
+      (.cleanup subjectTerminationWitnessCompletion)
+    let releaseState : AuthoritativeCacheState := {
+      authoritative := acknowledged.state.authoritative
+      cache := {
+        published := acknowledged.state.cache
+        pending := none
+        nextTicket := acknowledged.state.nextTicket } }
+    acknowledged.accepted = true ∧
+      acknowledged.state.authoritative.Invariant ∧
+      guardExactFrameRelease releaseState
+        subjectTerminationWitnessMapping.frame = .allowed := by
+  have hexact :=
+    subject_termination_checked_authoritative_acknowledges_exact_cleanup plan
+  have hretired :=
+    subject_termination_checked_authoritative_exact_completion_retires_all_authority
+      plan
+  dsimp only at hexact hretired ⊢
+  rcases hexact with ⟨haccepted, _hauthoritative, hcache, _hpending⟩
+  rcases hretired with
+    ⟨_haccepted, hinvariant, _hsubject, _haddress, _hassignments, hmappings,
+      _hlookup, _hpending⟩
+  refine ⟨haccepted, hinvariant, ?_⟩
+  apply exact_frame_release_allowed_only_after_cleanup
+  · rfl
+  · simp [hmappings]
+  · simp [hcache, entriesNameFrame]
+
+/-- Exact IOTLB cleanup completion opens the release guard but deliberately
+does not smuggle a memory-release transition into subject termination.  The
+canonical bound object still owns frame `4`, so a fresh allocation is rejected
+and stutters until an explicit checked memory release is published. -/
+theorem subject_termination_checked_authoritative_exact_completion_requires_explicit_memory_release
+    (plan : BootPageTablePlan.Plan) :
+    let prepared := prepareAuthoritativePublication
+      (subjectTerminationCheckedAuthoritativePublicationState plan)
+      (subject_termination_checked_before_invariant plan)
+      (.cleanup (.ordinary (.terminateSubject 2)))
+    let acknowledged := acknowledgeAuthoritativePublication prepared.state
+      (.cleanup subjectTerminationWitnessCompletion)
+    let allocated := MemoryLifecycle.allocate
+      acknowledged.state.authoritative.scrub.memory 21 1 2
+    acknowledged.accepted = true ∧
+      acknowledged.state.authoritative.Invariant ∧
+      acknowledged.state.authoritative.scrub.memory.binding 20 = some 4 ∧
+      allocated.result = .rejected .exhausted ∧
+      allocated.state = acknowledged.state.authoritative.scrub.memory := by
+  have hexact :=
+    subject_termination_checked_authoritative_acknowledges_exact_cleanup plan
+  have hretired :=
+    subject_termination_checked_authoritative_exact_completion_retires_all_authority
+      plan
+  dsimp only at hexact ⊢
+  have hmemory :
+      let acknowledged := acknowledgeAuthoritativePublication
+        (prepareAuthoritativePublication
+          (subjectTerminationCheckedAuthoritativePublicationState plan)
+          (subject_termination_checked_before_invariant plan)
+          (.cleanup (.ordinary (.terminateSubject 2)))).state
+        (.cleanup subjectTerminationWitnessCompletion)
+      acknowledged.state.authoritative.scrub.memory.binding 20 = some 4 ∧
+        (MemoryLifecycle.allocate acknowledged.state.authoritative.scrub.memory
+          21 1 2).result = .rejected .exhausted := by
+    dsimp only
+    rw [hexact.2.1]
+    rw [subject_termination_checked_apply_scrub_memory_coherent]
+    rw [subject_termination_checked_apply_eq_reconciled_candidate]
+    simpa [subjectTerminationCheckedKernelAfter,
+      subjectTerminationCheckedBefore, authoritativeSample] using
+      FailStop.compositeDispatcherTerminateSubjectTwo_requires_explicit_memory_release
+        plan
+  dsimp only at hretired
+  have hunchanged := MemoryLifecycle.allocate_rejected_unchanged
+    (acknowledgeAuthoritativePublication
+      (prepareAuthoritativePublication
+        (subjectTerminationCheckedAuthoritativePublicationState plan)
+        (subject_termination_checked_before_invariant plan)
+        (.cleanup (.ordinary (.terminateSubject 2)))).state
+      (.cleanup subjectTerminationWitnessCompletion)).state.authoritative.scrub.memory
+    21 1 2 .exhausted hmemory.2
+  exact ⟨hexact.1, hretired.2.1, hmemory.1, hmemory.2, hunchanged⟩
+
+/-- The old owner's ordinary subject/slot release path is intentionally no
+longer usable after exact cleanup: the same acknowledged result that opens
+the frame guard has already retired every capability of subject `2`.
+Consequently the follow-on memory publication must consume a checked cleanup
+receipt bound to object `20` and frame `4`; it cannot impersonate the retired
+owner or reuse the generic live-capability release gate. -/
+theorem subject_termination_checked_authoritative_exact_completion_requires_retired_release_receipt
+    (plan : BootPageTablePlan.Plan) :
+    let prepared := prepareAuthoritativePublication
+      (subjectTerminationCheckedAuthoritativePublicationState plan)
+      (subject_termination_checked_before_invariant plan)
+      (.cleanup (.ordinary (.terminateSubject 2)))
+    let acknowledged := acknowledgeAuthoritativePublication prepared.state
+      (.cleanup subjectTerminationWitnessCompletion)
+    let releaseState : AuthoritativeCacheState := {
+      authoritative := acknowledged.state.authoritative
+      cache := {
+        published := acknowledged.state.cache
+        pending := none
+        nextTicket := acknowledged.state.nextTicket } }
+    acknowledged.accepted = true ∧
+      acknowledged.state.authoritative.Invariant ∧
+      resolveReleaseFrame releaseState 2 2 = none ∧
+      guardFrameRelease releaseState 2 2 = .missingAuthority := by
+  have hclosed :=
+    subject_termination_checked_authoritative_exact_completion_closes_grants
+      plan
+  dsimp only at hclosed ⊢
+  rcases hclosed with
+    ⟨haccepted, hinvariant, hlookup, _hassignments, _hmappings, _hcache,
+      _hpending⟩
+  have hkernelCoherent := hinvariant.1.left.left
+  have hkernelCapabilities := hkernelCoherent.2.2.2.1
+  have hmemoryCapabilities := hkernelCoherent.2.2.2.2.1
+  have hvirtualToKernel := hmemoryCapabilities.trans hkernelCapabilities.symm
+  have hscrubMemory := hinvariant.2.2.2.2.1
+  have hscrubToKernel :=
+    (congrArg (fun memory => memory.capabilities) hscrubMemory).trans
+      hvirtualToKernel
+  have hscrubLookup :
+      LeanOS.Capability.lookup
+        (acknowledgeAuthoritativePublication
+          (prepareAuthoritativePublication
+            (subjectTerminationCheckedAuthoritativePublicationState plan)
+            (subject_termination_checked_before_invariant plan)
+            (.cleanup (.ordinary (.terminateSubject 2)))).state
+          (.cleanup subjectTerminationWitnessCompletion)).state.authoritative.scrub.memory.capabilities
+        2 2 = .invalidSubject := by
+    rw [hscrubToKernel]
+    exact hlookup 2
+  refine ⟨haccepted, hinvariant, ?_, ?_⟩
+  · simp [resolveReleaseFrame, hscrubLookup]
+  · simp [guardFrameRelease, resolveReleaseFrame, hscrubLookup]
+
+structure RetiredMemoryReleaseReceipt where
+  cleanupTicket : Nat
+  cleanupScopes : List InvalidationScope
+  object : MemoryLifecycle.ObjectId
+  frame : MemoryLifecycle.FrameId
+  deriving DecidableEq, Repr
+
+/-- Derive a retired-memory receipt only from the exact cleanup publication
+that is still pending.  The caller may nominate an object to release, but the
+publisher derives its frame from the authoritative pre-state and accepts the
+nomination only when that same object is live before cleanup, retired by the
+checked logical successor, and remains bound to the same frame. -/
+def deriveRetiredMemoryReleaseReceipt
+    (state : AuthoritativePublicationState)
+    (completion : AuthorityCleanupCompletion)
+    (object : MemoryLifecycle.ObjectId) : Option RetiredMemoryReleaseReceipt :=
+  match state.pending with
+  | some (.cleanup pending) =>
+      if completion.ticket = pending.ticket ∧
+          completion.scopes = pending.scopes ∧
+          pending.cacheBefore = state.cache then
+        match state.authoritative.scrub.memory.binding object with
+        | none => none
+        | some frame =>
+            if state.authoritative.scrub.memory.capabilities.objects object = true ∧
+                pending.logicalAfter.scrub.memory.capabilities.objects object = false ∧
+                pending.logicalAfter.scrub.memory.binding object = some frame then
+              some {
+                cleanupTicket := pending.ticket
+                cleanupScopes := pending.scopes
+                object
+                frame }
+            else none
+      else none
+  | _ => none
+
+/-- A derived receipt is tied to the nominated object, its authoritative
+pre-cleanup frame binding, and the exact ticket and scope set being
+acknowledged.  None of those values can be substituted after derivation. -/
+theorem derived_retired_memory_release_receipt_is_exact
+    state completion object receipt
+    (hderived :
+      deriveRetiredMemoryReleaseReceipt state completion object = some receipt) :
+    receipt.object = object ∧
+      state.authoritative.scrub.memory.binding object = some receipt.frame ∧
+      receipt.cleanupTicket = completion.ticket ∧
+      receipt.cleanupScopes = completion.scopes := by
+  simp only [deriveRetiredMemoryReleaseReceipt] at hderived
+  split at hderived <;> try contradiction
+  next pending hpending =>
+    split at hderived <;> try contradiction
+    next hexact =>
+      split at hderived <;> try contradiction
+      next frame hframe =>
+        split at hderived <;> try contradiction
+        cases hderived
+        simp_all
+
+/-- A completion with the wrong ticket cannot derive a retired-memory
+receipt, even if every caller-visible object and frame nomination is reused. -/
+theorem derive_retired_memory_release_receipt_wrong_ticket_none
+    state completion pending object
+    (hpending : state.pending = some (.cleanup pending))
+    (hticket : completion.ticket ≠ pending.ticket) :
+    deriveRetiredMemoryReleaseReceipt state completion object = none := by
+  simp [deriveRetiredMemoryReleaseReceipt, hpending, hticket]
+
+/-- Matching the ticket is insufficient: a missing, added, or reordered
+cleanup scope also makes receipt derivation stutter. -/
+theorem derive_retired_memory_release_receipt_wrong_scopes_none
+    state completion pending object
+    (hpending : state.pending = some (.cleanup pending))
+    (hscopes : completion.scopes ≠ pending.scopes) :
+    deriveRetiredMemoryReleaseReceipt state completion object = none := by
+  simp [deriveRetiredMemoryReleaseReceipt, hpending, hscopes]
+
+/-- Consume a derived retired-memory receipt at the allocator boundary.  The
+object must still have the exact binding carried by the receipt, must already
+be retired in the capability projection, and must still own that exact frame
+in the allocator.  Acceptance clears only the binding and allocator ownership;
+bytes and monotonic object-issuance history are retained for the later scrub
+and fresh-lifetime publication. -/
+def releaseRetiredMemoryWithReceipt
+    (state : FrameScrub.State)
+    (receipt : RetiredMemoryReleaseReceipt) : Option FrameScrub.State :=
+  if state.memory.binding receipt.object = some receipt.frame ∧
+      state.memory.capabilities.objects receipt.object = false then
+    match FrameAllocator.release state.memory.allocator receipt.object
+        receipt.frame with
+    | .error _ => none
+    | .ok allocator =>
+        some { state with
+          memory := { state.memory with
+            allocator
+            binding := MemoryLifecycle.setBinding state.memory.binding
+              receipt.object none } }
+  else none
+
+/-- A successful receipt consumption releases the exact bound frame, clears
+the retired object's binding, and preserves both residual bytes and the
+never-reuse issuance history. -/
+theorem release_retired_memory_with_receipt_exact
+    state receipt released
+    (hreleased :
+      releaseRetiredMemoryWithReceipt state receipt = some released) :
+    released.memory.binding receipt.object = none ∧
+      FrameAllocator.IsFree released.memory.allocator receipt.frame ∧
+      released.bytes = state.bytes ∧
+      released.memory.issued = state.memory.issued := by
+  simp only [releaseRetiredMemoryWithReceipt] at hreleased
+  split at hreleased <;> try contradiction
+  next hexact =>
+    split at hreleased <;> try contradiction
+    next allocator hallocator =>
+      injection hreleased with heq
+      subst released
+      refine ⟨by simp [MemoryLifecycle.setBinding], ?_, rfl, rfl⟩
+      exact FrameAllocator.released_is_free _ _ _ _ hallocator
+
+/-- Receipt consumption changes only allocator ownership and the nominated
+binding.  In particular, it cannot change the capability graph whose subject
+registry is consumed by every kernel lifecycle projection. -/
+theorem release_retired_memory_with_receipt_preserves_capabilities
+    state receipt released
+    (hreleased :
+      releaseRetiredMemoryWithReceipt state receipt = some released) :
+    released.memory.capabilities = state.memory.capabilities := by
+  simp only [releaseRetiredMemoryWithReceipt] at hreleased
+  split at hreleased <;> try contradiction
+  next _hexact =>
+    split at hreleased <;> try contradiction
+    next allocator _hallocator =>
+      injection hreleased with heq
+      subst released
+      rfl
+
+/-- Once the receipt has been consumed, replay against the cleared binding is
+inert even when every receipt field is repeated verbatim. -/
+theorem release_retired_memory_with_receipt_replay_none
+    state receipt
+    (hcleared : state.memory.binding receipt.object = none) :
+    releaseRetiredMemoryWithReceipt state receipt = none := by
+  simp [releaseRetiredMemoryWithReceipt, hcleared]
+
+/-- A receipt cannot be spliced onto another binding for the same object.
+Changing only the frame named by authoritative memory is enough to make the
+receipt inert, before allocator state is consulted or mutated. -/
+theorem release_retired_memory_with_receipt_wrong_binding_none
+    state receipt
+    (hbinding :
+      state.memory.binding receipt.object ≠ some receipt.frame) :
+    releaseRetiredMemoryWithReceipt state receipt = none := by
+  simp [releaseRetiredMemoryWithReceipt, hbinding]
+
+/-- The candidate release front door derives its receipt internally from the
+still-pending exact cleanup and applies it only to that cleanup's checked
+logical successor.  It exposes no caller-supplied frame or successor state.
+The resulting scrub candidate is intentionally not yet an authoritative
+publication; the outer kernel/IOMMU/scrub invariant remains the next gate. -/
+def deriveRetiredMemoryReleaseCandidate
+    (state : AuthoritativePublicationState)
+    (completion : AuthorityCleanupCompletion)
+    (object : MemoryLifecycle.ObjectId) : Option FrameScrub.State :=
+  match deriveRetiredMemoryReleaseReceipt state completion object with
+  | none => none
+  | some receipt =>
+      match state.pending with
+      | some (.cleanup pending) =>
+          releaseRetiredMemoryWithReceipt pending.logicalAfter.scrub receipt
+      | _ => none
+
+/-- A successful candidate exposes the exact pending cleanup and derived
+receipt that authorized it.  In particular, the resulting scrub projection
+has retired the nominated binding, freed that receipt's frame, and retained
+the checked logical successor's bytes and monotonic issuance history.  These
+facts are the inputs required by the later cross-projection publication
+proof; no caller-selected frame or successor can satisfy this theorem. -/
+theorem derive_retired_memory_release_candidate_exact
+    state completion object released
+    (hderived :
+      deriveRetiredMemoryReleaseCandidate state completion object =
+        some released) :
+    ∃ receipt pending,
+      deriveRetiredMemoryReleaseReceipt state completion object = some receipt ∧
+      state.pending = some (.cleanup pending) ∧
+      receipt.object = object ∧
+      released.memory.binding object = none ∧
+      FrameAllocator.IsFree released.memory.allocator receipt.frame ∧
+      released.bytes = pending.logicalAfter.scrub.bytes ∧
+      released.memory.issued = pending.logicalAfter.scrub.memory.issued := by
+  simp only [deriveRetiredMemoryReleaseCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      have hexact :=
+        release_retired_memory_with_receipt_exact
+          pending.logicalAfter.scrub receipt released hderived
+      have hreceiptExact :=
+        derived_retired_memory_release_receipt_is_exact
+          state completion object receipt hreceipt
+      refine ⟨receipt, pending, hreceipt, hpending, hreceiptExact.1, ?_,
+        hexact.2.1, hexact.2.2.1, hexact.2.2.2⟩
+      simpa [hreceiptExact.1] using hexact.1
+
+/-- A stale or forged cleanup ticket cannot reach the allocator release
+candidate, so the complete pending authoritative publication remains the only
+source of release authority. -/
+theorem derive_retired_memory_release_candidate_wrong_ticket_none
+    state completion pending object
+    (hpending : state.pending = some (.cleanup pending))
+    (hticket : completion.ticket ≠ pending.ticket) :
+    deriveRetiredMemoryReleaseCandidate state completion object = none := by
+  simp [deriveRetiredMemoryReleaseCandidate,
+    deriveRetiredMemoryReleaseReceipt, hpending, hticket]
+
+/-- A completion with a missing, added, or reordered cleanup scope cannot
+reach the allocator release candidate. Scope equality is checked while the
+authoritative cleanup is still pending, before the logical successor or its
+memory projection can be consumed. -/
+theorem derive_retired_memory_release_candidate_wrong_scopes_none
+    state completion pending object
+    (hpending : state.pending = some (.cleanup pending))
+    (hscopes : completion.scopes ≠ pending.scopes) :
+    deriveRetiredMemoryReleaseCandidate state completion object = none := by
+  simp [deriveRetiredMemoryReleaseCandidate,
+    deriveRetiredMemoryReleaseReceipt, hpending, hscopes]
+
+/-! ## Invariant-bearing retired-memory publication candidate
+
+Receipt consumption above changes the allocator and binding projections.  A
+publishable successor must mirror that exact memory state through every
+kernel consumer and through the IOMMU authority projection before the outer
+invariant gate is allowed to inspect it.  These helpers construct that one
+candidate; they do not bypass the later `AuthoritativeExtension.Invariant`
+proof or turn a failed validation into a partial publication.
+-/
+
+private def publishRetiredMemoryKernel
+    (kernel : FailStop.CompositeState) (memory : MemoryLifecycle.State) :
+    FailStop.CompositeState :=
+  let lifecycle := { kernel.lifecycle with capabilities := memory.capabilities }
+  let scheduler := { kernel.scheduler with lifecycle }
+  let virtualMemory := { kernel.virtualMemory with memory }
+  let endpoints := { kernel.ipc.endpoints with
+    capabilities := memory.capabilities
+    allocator := memory.allocator
+    binding := memory.binding
+    issued := memory.issued }
+  { kernel with
+    execution := { kernel.execution with
+      core := { kernel.execution.core with lifecycle }
+      returnAuthorityArmed := false }
+    scheduler
+    preemption := { kernel.preemption with scheduler }
+    virtualMemory
+    ipc := { kernel.ipc with virtualMemory, endpoints }
+    capabilities := memory.capabilities
+    lifecycle
+    resumable := { kernel.resumable with
+      scheduler
+      translations := { kernel.resumable.translations with
+        virtual := virtualMemory } }
+    transfers := { kernel.transfers with toEndpointState := endpoints }
+    blockingIPC := { kernel.blockingIPC with scheduler } }
+
+private def clearRetiredFrameAuthority
+    (authority : LeanOS.Capability.ObjectId → Option FrameHandle)
+    (object : LeanOS.Capability.ObjectId) :=
+  fun candidate => if candidate = object then none else authority candidate
+
+private def retiredMemoryReleaseCore (core : Core)
+    (released : FrameScrub.State) (object : MemoryLifecycle.ObjectId) : Core :=
+  { core with
+    capabilityAuthority := released.memory.capabilities
+    frameAuthority := clearRetiredFrameAuthority core.frameAuthority object
+    capabilities := core.capabilities.filter (·.object != object)
+    memory := released.bytes }
+
+/-- Construct the sole cross-projection successor from the exact pending
+cleanup and its internally derived receipt.  IOMMU validation and capability
+well-formedness are checked before a candidate exists; the complete outer
+invariant remains the publication gate for the next proof step. -/
+noncomputable def deriveRetiredMemoryAuthoritativeCandidate
+    (state : AuthoritativePublicationState)
+    (completion : AuthorityCleanupCompletion)
+    (object : MemoryLifecycle.ObjectId) : Option AuthoritativeExtension := by
+  classical
+  match deriveRetiredMemoryReleaseReceipt state completion object with
+  | none => exact none
+  | some receipt =>
+      match state.pending with
+      | some (.cleanup pending) =>
+          match releaseRetiredMemoryWithReceipt pending.logicalAfter.scrub receipt with
+          | none => exact none
+          | some released =>
+              let kernel := publishRetiredMemoryKernel
+                pending.logicalAfter.kernel released.memory
+              let core := retiredMemoryReleaseCore
+                pending.logicalAfter.iommu.core released object
+              if hcapability : LeanOS.Capability.WellFormed
+                  core.capabilityAuthority then
+                if hvalid : validateCore core = true then
+                  exact some {
+                    kernel
+                    iommu := ⟨core, hvalid, hcapability⟩
+                    scrub := released }
+                else exact none
+              else exact none
+      | _ => exact none
+
+/-- Every successful construction has already installed the released memory
+in the kernel virtual-memory and scrub projections, synchronized the IOMMU
+bytes and capability authority, and cleared the retired object's device-frame
+authority.  These are exact construction facts, not caller premises. -/
+theorem derive_retired_memory_authoritative_candidate_projects_release
+    state completion object after
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate state completion object =
+        some after) :
+    after.scrub.memory = after.kernel.virtualMemory.memory ∧
+      after.iommu.core.memory = after.scrub.bytes ∧
+      after.iommu.core.capabilityAuthority = after.kernel.capabilities ∧
+      after.iommu.core.frameAuthority object = none := by
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      split at hderived <;> try contradiction
+      next released hreleased =>
+        split at hderived <;> try contradiction
+        next hcapability =>
+          split at hderived <;> try contradiction
+          next hvalid =>
+            injection hderived with heq
+            subst after
+            simp [publishRetiredMemoryKernel, retiredMemoryReleaseCore,
+              clearRetiredFrameAuthority]
+
+/-- Capability well-formedness is a construction fact of every successful
+authoritative release candidate.  The constructor validates the exact
+receipt-derived capability projection before installing that same projection
+in the kernel, so the later runtime proof does not accept it as a caller
+premise. -/
+theorem derive_retired_memory_authoritative_candidate_capabilities_well_formed
+    state completion object after
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate state completion object =
+        some after) :
+    LeanOS.Capability.WellFormed after.kernel.capabilities := by
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt _hreceipt =>
+    split at hderived <;> try contradiction
+    next pending _hpending =>
+      split at hderived <;> try contradiction
+      next released _hreleased =>
+        split at hderived <;> try contradiction
+        next hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            simpa [publishRetiredMemoryKernel,
+              retiredMemoryReleaseCore] using hcapability
+
+/- Receipt-derived publication preserves the execution-latch invariant.  The
+interrupt core receives the exact receipt-preserved lifecycle, while return
+authority is deliberately disarmed; execution mode and entry state remain
+unchanged from the checked pending successor. -/
+theorem derive_retired_memory_authoritative_candidate_preserves_execution
+    state completion object after
+    (hinvariant : ∀ pending,
+      state.pending = some (.cleanup pending) →
+        pending.logicalAfter.Invariant)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate state completion object =
+        some after) :
+    FailStop.WellFormed after.kernel.execution := by
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt _hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      split at hderived <;> try contradiction
+      next released hreleased =>
+        have hbefore := hinvariant pending hpending
+        have hexecution : FailStop.WellFormed
+            pending.logicalAfter.kernel.execution := hbefore.1.left.2.1
+        have hkernelCoherent := hbefore.1.left.1
+        have houterCoherent := hbefore.2.2
+        have hcapabilities :=
+          release_retired_memory_with_receipt_preserves_capabilities
+            pending.logicalAfter.scrub receipt released hreleased
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            rcases hkernelCoherent with
+              ⟨hcoreLifecycle, _, _, _, hvirtualCapabilities, _⟩
+            rcases houterCoherent with
+              ⟨_, _, hscrubMemory, _⟩
+            rcases hexecution with ⟨hcore, _hreturn, hmode⟩
+            have hreleasedCapabilities :
+                released.memory.capabilities =
+                  pending.logicalAfter.kernel.lifecycle.capabilities := by
+              calc
+                released.memory.capabilities =
+                    pending.logicalAfter.scrub.memory.capabilities :=
+                  hcapabilities
+                _ = pending.logicalAfter.kernel.virtualMemory.memory.capabilities :=
+                  congrArg (fun memory => memory.capabilities) hscrubMemory
+                _ = pending.logicalAfter.kernel.lifecycle.capabilities :=
+                  hvirtualCapabilities
+            have hlifecycle :
+                { pending.logicalAfter.kernel.lifecycle with
+                    capabilities := released.memory.capabilities } =
+                  pending.logicalAfter.kernel.lifecycle := by
+              rw [hreleasedCapabilities]
+            have hcorePublished :
+                { pending.logicalAfter.kernel.execution.core with
+                    lifecycle :=
+                      { pending.logicalAfter.kernel.lifecycle with
+                        capabilities := released.memory.capabilities } } =
+                  pending.logicalAfter.kernel.execution.core := by
+              rw [hlifecycle, ← hcoreLifecycle]
+            refine ⟨?_, by simp [publishRetiredMemoryKernel], ?_⟩
+            · change Interrupt.WellFormed
+                { pending.logicalAfter.kernel.execution.core with
+                  lifecycle :=
+                    { pending.logicalAfter.kernel.lifecycle with
+                      capabilities := released.memory.capabilities } }
+              rw [hcorePublished]
+              exact hcore
+            · simpa [publishRetiredMemoryKernel, hlifecycle] using hmode
+
+/-- A successful release candidate preserves the authoritative subject
+lifecycle invariant.  The pending successor supplies the already-checked
+runtime invariant, while receipt consumption preserves its capability subject
+registry exactly; the publisher merely mirrors that registry through the
+kernel lifecycle projections. -/
+theorem derive_retired_memory_authoritative_candidate_preserves_subject_lifecycle
+    state completion object after
+    (hinvariant : ∀ pending,
+      state.pending = some (.cleanup pending) →
+        pending.logicalAfter.Invariant)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate state completion object =
+        some after) :
+    SubjectLifecycle.WellFormed after.kernel.lifecycle := by
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt _hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      split at hderived <;> try contradiction
+      next released hreleased =>
+        have hbefore := hinvariant pending hpending
+        have hlifecycle : SubjectLifecycle.WellFormed
+            pending.logicalAfter.kernel.lifecycle := hbefore.1.left.2.2.1
+        have hkernelCoherent := hbefore.1.left.1
+        have houterCoherent := hbefore.2.2
+        have hcapabilities :=
+          release_retired_memory_with_receipt_preserves_capabilities
+            pending.logicalAfter.scrub receipt released hreleased
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            rcases hkernelCoherent with
+              ⟨_, _, _, _, hvirtualCapabilities, _⟩
+            rcases houterCoherent with
+              ⟨_, _, hscrubMemory, _⟩
+            simpa [publishRetiredMemoryKernel, SubjectLifecycle.WellFormed,
+              hcapabilities, hscrubMemory, hvirtualCapabilities] using hlifecycle
+
+/-- A successful release candidate also preserves the virtual-address-space
+lifecycle.  The released object was already retired in the checked cleanup
+successor, so no well-formed mapping can name it; clearing only that binding
+and allocator owner therefore leaves every surviving mapping live, owned, and
+authorized while the publisher retains owners, mappings, and issuance. -/
+theorem derive_retired_memory_authoritative_candidate_preserves_virtual_lifecycle
+    state completion object after
+    (hinvariant : ∀ pending,
+      state.pending = some (.cleanup pending) →
+        pending.logicalAfter.Invariant)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate state completion object =
+        some after) :
+    VirtualMapping.LifecycleWellFormed after.kernel.virtualMemory := by
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt _hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      split at hderived <;> try contradiction
+      next released hreleased =>
+        have hbefore := hinvariant pending hpending
+        have hvirtual : VirtualMapping.LifecycleWellFormed
+            pending.logicalAfter.kernel.virtualMemory :=
+          hbefore.1.left.2.2.2.2.1
+        have houterCoherent := hbefore.2.2
+        rcases houterCoherent with ⟨_, _, hscrubMemory, _⟩
+        have hvirtualScrub : VirtualMapping.LifecycleWellFormed
+            { pending.logicalAfter.kernel.virtualMemory with
+              memory := pending.logicalAfter.scrub.memory } := by
+          simpa [hscrubMemory] using hvirtual
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            simp only [releaseRetiredMemoryWithReceipt] at hreleased
+            split at hreleased <;> try contradiction
+            next hexact =>
+              split at hreleased <;> try contradiction
+              next allocator hallocator =>
+                injection hreleased with heq
+                subst released
+                simp only [FrameAllocator.release] at hallocator
+                split at hallocator <;> try contradiction
+                next hreceiptOwned =>
+                  injection hallocator with heq
+                  subst allocator
+                  simp only [publishRetiredMemoryKernel]
+                  rcases hvirtualScrub with
+                    ⟨⟨howners, hmappings⟩, hcapabilities, hownerLive, hliveOwner⟩
+                  refine ⟨⟨howners, ?_⟩, hcapabilities, hownerLive, hliveOwner⟩
+                  intro addressSpace page mapping hmapping
+                  rcases hmappings addressSpace page mapping hmapping with
+                    ⟨subject, frame, howner, hpermissions, hbinding, howned,
+                      hread, hwrite⟩
+                  have authority_object_live {right : Capability.Right}
+                      (hauthority : Capability.HasAuthority
+                        pending.logicalAfter.scrub.memory.capabilities
+                        subject mapping.object right) :
+                      pending.logicalAfter.scrub.memory.capabilities.objects
+                        mapping.object = true := by
+                    rcases hauthority with ⟨slot, capability, hslot, hobject, _⟩
+                    rw [← hobject]
+                    exact (hcapabilities.1 subject slot capability hslot).2.1
+                  have hobjectLive :
+                      pending.logicalAfter.scrub.memory.capabilities.objects
+                        mapping.object = true := by
+                    by_cases hreadable : mapping.permissions.read = true
+                    · exact authority_object_live (hread hreadable)
+                    · have hwritable : mapping.permissions.write = true := by
+                        cases hr : mapping.permissions.read <;>
+                          cases hw : mapping.permissions.write <;>
+                          simp_all [VirtualMapping.Permissions.nonempty]
+                      exact authority_object_live (hwrite hwritable)
+                  have hobject : mapping.object ≠ receipt.object := by
+                    intro heq
+                    rw [heq, hexact.2] at hobjectLive
+                    contradiction
+                  have hframe : frame ≠ receipt.frame := by
+                    intro heq
+                    subst frame
+                    exact hobject (FrameAllocator.ownership_exclusive
+                      pending.logicalAfter.scrub.memory.allocator receipt.frame
+                      mapping.object receipt.object howned hreceiptOwned)
+                  refine ⟨subject, frame, howner, hpermissions, ?_, ?_, hread, hwrite⟩
+                  · simpa [MemoryLifecycle.setBinding, hobject] using hbinding
+                  · simpa [FrameAllocator.IsOwnedBy, FrameAllocator.setStatus,
+                      hframe] using howned
+
+/-- Receipt-derived publication retains the authoritative scheduler.  Memory
+release does not change the capability subject registry, and coherence ties
+that registry to the lifecycle already installed in the scheduler, so its
+queue, current subject, capacity, and complete well-formedness proof survive
+unchanged. -/
+theorem derive_retired_memory_authoritative_candidate_preserves_scheduler
+    state completion object after
+    (hinvariant : ∀ pending,
+      state.pending = some (.cleanup pending) →
+        pending.logicalAfter.Invariant)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate state completion object =
+        some after) :
+    Scheduler.WellFormed after.kernel.scheduler := by
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt _hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      split at hderived <;> try contradiction
+      next released hreleased =>
+        have hbefore := hinvariant pending hpending
+        have hscheduler : Scheduler.WellFormed
+            pending.logicalAfter.kernel.scheduler :=
+          hbefore.1.left.2.2.2.2.2.2.1
+        have hkernelCoherent := hbefore.1.left.1
+        have houterCoherent := hbefore.2.2
+        have hcapabilities :=
+          release_retired_memory_with_receipt_preserves_capabilities
+            pending.logicalAfter.scrub receipt released hreleased
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            rcases hkernelCoherent with
+              ⟨_, hschedulerLifecycle, _, _, hvirtualCapabilities, _⟩
+            rcases houterCoherent with
+              ⟨_, _, hscrubMemory, _⟩
+            simpa [publishRetiredMemoryKernel, hcapabilities, hscrubMemory,
+              hvirtualCapabilities, ← hschedulerLifecycle] using hscheduler
+
+/-- Receipt-derived publication preserves the one-shot preemption invariant.
+The publisher changes only the scheduler projection inside preemption; its
+timer latch and accepted-tick count remain exact, while the replacement
+scheduler is the already-proved well-formed authoritative scheduler. -/
+theorem derive_retired_memory_authoritative_candidate_preserves_preemption
+    state completion object after
+    (hinvariant : ∀ pending,
+      state.pending = some (.cleanup pending) →
+        pending.logicalAfter.Invariant)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate state completion object =
+        some after) :
+    Preemption.WellFormed after.kernel.preemption := by
+  have hscheduler :=
+    derive_retired_memory_authoritative_candidate_preserves_scheduler
+      state completion object after hinvariant hderived
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt _hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      split at hderived <;> try contradiction
+      next released _hreleased =>
+        have hbefore := hinvariant pending hpending
+        have hpreemption : Preemption.WellFormed
+            pending.logicalAfter.kernel.preemption :=
+          hbefore.1.left.2.2.2.2.2.2.2.1
+        have hticks := hpreemption.2
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            exact ⟨by
+              simpa [publishRetiredMemoryKernel] using hscheduler,
+              by
+                change pending.logicalAfter.kernel.preemption.acceptedTicks =
+                  if pending.logicalAfter.kernel.preemption.timerArmed then 0 else 1
+                exact hticks⟩
+
+/- Receipt-derived publication synchronizes the resumable translation view
+with the released virtual-memory projection.  Its capability registry is the
+same internally validated registry installed in the scheduler lifecycle, and
+the complete virtual lifecycle proof is inherited from the checked cleanup
+successor rather than assumed for a caller-selected state. -/
+theorem derive_retired_memory_authoritative_candidate_preserves_resumable_virtual_agreement
+    state completion object after
+    (hinvariant : ∀ pending,
+      state.pending = some (.cleanup pending) →
+        pending.logicalAfter.Invariant)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate state completion object =
+        some after) :
+    ResumablePreemption.VirtualAgreement after.kernel.resumable := by
+  have hvirtual :=
+    derive_retired_memory_authoritative_candidate_preserves_virtual_lifecycle
+      state completion object after hinvariant hderived
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt _hreceipt =>
+    split at hderived <;> try contradiction
+    next pending _hpending =>
+      split at hderived <;> try contradiction
+      next released _hreleased =>
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            exact ⟨by
+              simp [publishRetiredMemoryKernel],
+              by
+                simpa [publishRetiredMemoryKernel] using hvirtual⟩
+
+/- Receipt-derived publication preserves the complete resumable-preemption
+invariant.  The context bank, active translation, and cache inventory remain
+unchanged; the only replaced projections are the already-proved scheduler and
+virtual-memory successor, whose capability registries stay exact. -/
+theorem derive_retired_memory_authoritative_candidate_preserves_resumable
+    state completion object after
+    (hinvariant : ∀ pending,
+      state.pending = some (.cleanup pending) →
+        pending.logicalAfter.Invariant)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate state completion object =
+        some after) :
+    ResumablePreemption.WellFormed after.kernel.resumable := by
+  have hscheduler :=
+    derive_retired_memory_authoritative_candidate_preserves_scheduler
+      state completion object after hinvariant hderived
+  have hvirtual :=
+    derive_retired_memory_authoritative_candidate_preserves_resumable_virtual_agreement
+      state completion object after hinvariant hderived
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt _hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      split at hderived <;> try contradiction
+      next released hreleased =>
+        have hbefore := hinvariant pending hpending
+        have hresumable : ResumablePreemption.WellFormed
+            pending.logicalAfter.kernel.resumable :=
+          hbefore.1.left.2.2.2.2.2.2.2.2.1
+        have hkernelCoherent := hbefore.1.left.1
+        have houterCoherent := hbefore.2.2
+        have hcapabilities :=
+          release_retired_memory_with_receipt_preserves_capabilities
+            pending.logicalAfter.scrub receipt released hreleased
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            rcases hkernelCoherent with
+              ⟨_, hschedulerLifecycle, _, _, hvirtualCapabilities, _, _,
+                hresumableScheduler, hresumableVirtual, _⟩
+            rcases houterCoherent with
+              ⟨_, _, hscrubMemory, _⟩
+            rcases hresumable with
+              ⟨_, hcapacity, hunique, hcontexts, habsent, hready,
+                htranslation, _, hresources, hcache⟩
+            refine ⟨by simpa [publishRetiredMemoryKernel] using hscheduler,
+              hcapacity, hunique, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+            · simpa [publishRetiredMemoryKernel, ResumablePreemption.validContext,
+                hcapabilities, hscrubMemory, hvirtualCapabilities,
+                hresumableScheduler, hresumableVirtual,
+                ← hschedulerLifecycle] using hcontexts
+            · simpa [publishRetiredMemoryKernel, hcapabilities, hscrubMemory,
+                hvirtualCapabilities, hresumableScheduler, hresumableVirtual,
+                ← hschedulerLifecycle] using habsent
+            · simpa [publishRetiredMemoryKernel,
+                ResumablePreemption.ReadyContextAgreement, hcapabilities,
+                hscrubMemory, hvirtualCapabilities,
+                hresumableScheduler, hresumableVirtual,
+                ← hschedulerLifecycle] using hready
+            · simpa [publishRetiredMemoryKernel,
+                ResumablePreemption.TranslationAgreement, hcapabilities,
+                hscrubMemory, hvirtualCapabilities,
+                hresumableScheduler, hresumableVirtual,
+                ← hschedulerLifecycle] using htranslation
+            · simpa [publishRetiredMemoryKernel] using hvirtual
+            · simpa [publishRetiredMemoryKernel,
+                ResumablePreemption.ResourceKindAgreement, hcapabilities,
+                hscrubMemory, hvirtualCapabilities,
+                hresumableScheduler, hresumableVirtual,
+                ← hschedulerLifecycle] using hresources
+            · simpa [publishRetiredMemoryKernel, TLB.Coherent] using hcache
+
+/- Receipt-derived publication preserves both IPC authority surfaces.  The
+released virtual-memory projection supplies the IPC mapping half, while
+receipt consumption retains the exact capability registry installed in the
+endpoint state.  The transfer layer therefore observes the same unchanged
+endpoint state rather than a separately reconstructed authority view. -/
+theorem derive_retired_memory_authoritative_candidate_preserves_ipc_authority
+    state completion object after
+    (hinvariant : ∀ pending,
+      state.pending = some (.cleanup pending) →
+        pending.logicalAfter.Invariant)
+    (hissued : ∀ pending,
+      state.pending = some (.cleanup pending) →
+        pending.logicalAfter.kernel.ipc.endpoints.issued =
+          pending.logicalAfter.scrub.memory.issued)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate state completion object =
+        some after) :
+    IPCSyscall.WellFormed after.kernel.ipc ∧
+      CapabilityTransfer.WellFormed after.kernel.transfers := by
+  have hvirtual :=
+    derive_retired_memory_authoritative_candidate_preserves_virtual_lifecycle
+      state completion object after hinvariant hderived
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt _hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      split at hderived <;> try contradiction
+      next released hreleased =>
+        have hbefore := hinvariant pending hpending
+        have hipc : IPCSyscall.WellFormed pending.logicalAfter.kernel.ipc :=
+          hbefore.1.left.2.2.2.2.2.1
+        have htransfers : CapabilityTransfer.WellFormed
+            pending.logicalAfter.kernel.transfers :=
+          hbefore.1.left.2.2.2.2.2.2.2.2.2.1
+        have hkernelCoherent := hbefore.1.left.1
+        have houterCoherent := hbefore.2.2
+        have hcapabilities :=
+          release_retired_memory_with_receipt_preserves_capabilities
+            pending.logicalAfter.scrub receipt released hreleased
+        have hreleasedIssued :=
+          (release_retired_memory_with_receipt_exact
+            pending.logicalAfter.scrub receipt released hreleased).2.2.2
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            rcases hkernelCoherent with
+              ⟨_, _, _, _, hvirtualCapabilities, _, hendpointCapabilities,
+                _, _, htransferEndpoints, _⟩
+            rcases houterCoherent with
+              ⟨_, _, hscrubMemory, _⟩
+            have hreleasedCapabilities :
+                released.memory.capabilities =
+                  pending.logicalAfter.kernel.lifecycle.capabilities := by
+              calc
+                released.memory.capabilities =
+                    pending.logicalAfter.scrub.memory.capabilities :=
+                  hcapabilities
+                _ = pending.logicalAfter.kernel.virtualMemory.memory.capabilities :=
+                  congrArg (fun memory => memory.capabilities) hscrubMemory
+                _ = pending.logicalAfter.kernel.lifecycle.capabilities :=
+                  hvirtualCapabilities
+            have hendpointCapabilitiesEq :
+                released.memory.capabilities =
+                  pending.logicalAfter.kernel.ipc.endpoints.capabilities := by
+              rw [hreleasedCapabilities, hendpointCapabilities]
+            have hendpointIssuedEq :
+                released.memory.issued =
+                  pending.logicalAfter.kernel.ipc.endpoints.issued := by
+              rw [hreleasedIssued, hissued pending hpending]
+            refine ⟨⟨by
+              simpa [publishRetiredMemoryKernel] using hvirtual,
+              by simpa [EndpointIPC.WellFormed, publishRetiredMemoryKernel,
+                hendpointCapabilitiesEq, hendpointIssuedEq] using hipc.2⟩,
+              ?_⟩
+            simpa [CapabilityTransfer.WellFormed, EndpointIPC.WellFormed,
+              publishRetiredMemoryKernel, hendpointCapabilitiesEq,
+              hendpointIssuedEq, htransferEndpoints] using htransfers
+
+/- Receipt-derived publication preserves the authoritative blocking-IPC
+store.  Waiter queues, mailbox reservations, and completion records remain
+unchanged; only their scheduler view is replaced by the already-proved
+authoritative scheduler with the same receipt-preserved capability registry. -/
+theorem derive_retired_memory_authoritative_candidate_preserves_blocking_ipc
+    state completion object after
+    (hinvariant : ∀ pending,
+      state.pending = some (.cleanup pending) →
+        pending.logicalAfter.Invariant)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate state completion object =
+        some after) :
+    BlockingIPC.WellFormed after.kernel.blockingIPC := by
+  have hscheduler :=
+    derive_retired_memory_authoritative_candidate_preserves_scheduler
+      state completion object after hinvariant hderived
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt _hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      split at hderived <;> try contradiction
+      next released hreleased =>
+        have hbefore := hinvariant pending hpending
+        have hblocking : BlockingIPC.WellFormed
+            pending.logicalAfter.kernel.blockingIPC :=
+          hbefore.1.blocking.2.1
+        have hblockingScheduler := hbefore.1.left.blockingScheduler
+        have hkernelCoherent := hbefore.1.left.1
+        have houterCoherent := hbefore.2.2
+        have hcapabilities :=
+          release_retired_memory_with_receipt_preserves_capabilities
+            pending.logicalAfter.scrub receipt released hreleased
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            rcases hkernelCoherent with
+              ⟨_, hschedulerLifecycle, _, _, hvirtualCapabilities, _⟩
+            rcases houterCoherent with
+              ⟨_, _, hscrubMemory, _⟩
+            have hreleasedCapabilities :
+                released.memory.capabilities =
+                  pending.logicalAfter.kernel.lifecycle.capabilities := by
+              calc
+                released.memory.capabilities =
+                    pending.logicalAfter.scrub.memory.capabilities :=
+                  hcapabilities
+                _ = pending.logicalAfter.kernel.virtualMemory.memory.capabilities :=
+                  congrArg (fun memory => memory.capabilities) hscrubMemory
+                _ = pending.logicalAfter.kernel.lifecycle.capabilities :=
+                  hvirtualCapabilities
+            have hlifecycle :
+                { pending.logicalAfter.kernel.lifecycle with
+                    capabilities := released.memory.capabilities } =
+                  pending.logicalAfter.kernel.lifecycle := by
+              rw [hreleasedCapabilities]
+            have hscheduler :
+                { pending.logicalAfter.kernel.scheduler with
+                    lifecycle :=
+                      { pending.logicalAfter.kernel.lifecycle with
+                        capabilities := released.memory.capabilities } } =
+                  pending.logicalAfter.kernel.scheduler := by
+              rw [hlifecycle, ← hschedulerLifecycle]
+            have hblockingState :
+                { pending.logicalAfter.kernel.blockingIPC with
+                    scheduler := pending.logicalAfter.kernel.scheduler } =
+                  pending.logicalAfter.kernel.blockingIPC := by
+              rw [← hblockingScheduler]
+            simpa [publishRetiredMemoryKernel, hscheduler,
+              hblockingState] using hblocking
+
+/- Receipt-derived publication keeps the blocking store on the exact
+authoritative scheduler and lifecycle installed in the composite runtime.
+This closes the cross-projection half of the blocking invariant separately
+from the store's internal well-formedness proof above. -/
+theorem derive_retired_memory_authoritative_candidate_preserves_blocking_ipc_coherence
+    state completion object after
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate state completion object =
+        some after) :
+    after.kernel.BlockingIPCCoherent := by
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next _receipt _hreceipt =>
+    split at hderived <;> try contradiction
+    next _pending _hpending =>
+      split at hderived <;> try contradiction
+      next _released _hreleased =>
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            simp [FailStop.CompositeState.BlockingIPCCoherent,
+              publishRetiredMemoryKernel]
+
+/- Receipt-derived publication preserves the complete deferred-cancellation
+classification.  The detached and waiter context banks remain unchanged, and
+receipt consumption preserves the capability registry, so the scheduler
+installed in the blocking store is definitionally the checked pending
+scheduler.  The resumable context bank is retained literally. -/
+theorem derive_retired_memory_authoritative_candidate_preserves_deferred_cancellation
+    state completion object after
+    (hinvariant : ∀ pending,
+      state.pending = some (.cleanup pending) →
+        pending.logicalAfter.Invariant)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate state completion object =
+        some after) :
+    after.kernel.DeferredCancellationWellFormed := by
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt _hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      split at hderived <;> try contradiction
+      next released hreleased =>
+        have hbefore := hinvariant pending hpending
+        have hdeferred := hbefore.1.right
+        have hblockingScheduler := hbefore.1.left.blockingScheduler
+        have hkernelCoherent := hbefore.1.left.left
+        have houterCoherent := hbefore.2.2
+        have hcapabilities :=
+          release_retired_memory_with_receipt_preserves_capabilities
+            pending.logicalAfter.scrub receipt released hreleased
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            rcases hkernelCoherent with
+              ⟨_, hschedulerLifecycle, _, _, hvirtualCapabilities, _⟩
+            rcases houterCoherent with
+              ⟨_, _, hscrubMemory, _⟩
+            have hreleasedCapabilities :
+                released.memory.capabilities =
+                  pending.logicalAfter.kernel.lifecycle.capabilities := by
+              calc
+                released.memory.capabilities =
+                    pending.logicalAfter.scrub.memory.capabilities :=
+                  hcapabilities
+                _ = pending.logicalAfter.kernel.virtualMemory.memory.capabilities :=
+                  congrArg (fun memory => memory.capabilities) hscrubMemory
+                _ = pending.logicalAfter.kernel.lifecycle.capabilities :=
+                  hvirtualCapabilities
+            have hlifecycle :
+                { pending.logicalAfter.kernel.lifecycle with
+                    capabilities := released.memory.capabilities } =
+                  pending.logicalAfter.kernel.lifecycle := by
+              rw [hreleasedCapabilities]
+            have hscheduler :
+                { pending.logicalAfter.kernel.scheduler with
+                    lifecycle :=
+                      { pending.logicalAfter.kernel.lifecycle with
+                        capabilities := released.memory.capabilities } } =
+                  pending.logicalAfter.kernel.scheduler := by
+              rw [hlifecycle, ← hschedulerLifecycle]
+            have hblockingState :
+                { pending.logicalAfter.kernel.blockingIPC with
+                    scheduler := pending.logicalAfter.kernel.scheduler } =
+                  pending.logicalAfter.kernel.blockingIPC := by
+              rw [← hblockingScheduler]
+            simpa [FailStop.CompositeState.DeferredCancellationWellFormed,
+              FailStop.CompositeState.blockingIPCContext,
+              publishRetiredMemoryKernel, hscheduler,
+              hblockingState] using hdeferred
+
+/- Receipt-derived publication retains the boot-accepted machine controls.
+Memory and capability release cannot relax direct-port policy or change the
+exact PCI control observation that witnesses DMA quarantine. -/
+theorem derive_retired_memory_authoritative_candidate_preserves_machine_controls
+    state completion object after
+    (hinvariant : ∀ pending,
+      state.pending = some (.cleanup pending) →
+        pending.logicalAfter.Invariant)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate state completion object =
+        some after) :
+    DirectPortIO.AcceptedControls after.kernel.directPortIO.controls ∧
+      after.kernel.DMAQuarantined := by
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next _receipt _hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      split at hderived <;> try contradiction
+      next _released _hreleased =>
+        have hbefore := (hinvariant pending hpending).1.left
+        have hcontrols := hbefore.directPortControls
+        have hdma := hbefore.dmaQuarantined
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            exact ⟨by
+              simpa [publishRetiredMemoryKernel] using hcontrols,
+              by simpa [publishRetiredMemoryKernel] using hdma⟩
+
+/- Receipt-derived publication cannot alter the invalidation-publication
+protocol.  The publisher updates only memory and authority projections, so
+the pending cleanup successor's machine-checked publication invariant is
+retained definitionally rather than reconstructed from caller evidence. -/
+theorem derive_retired_memory_authoritative_candidate_preserves_invalidation_publication
+    state completion object after
+    (hinvariant : ∀ pending,
+      state.pending = some (.cleanup pending) →
+        pending.logicalAfter.Invariant)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate state completion object =
+        some after) :
+    InvalidationPublication.WellFormed
+      after.kernel.invalidationPublication := by
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next _receipt _hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      split at hderived <;> try contradiction
+      next _released _hreleased =>
+        have hpublication := (hinvariant pending hpending).1.publication
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            simpa [publishRetiredMemoryKernel] using hpublication
+
+/-- Every successful receipt-derived release candidate preserves the complete
+authoritative kernel runtime invariant.  The constructor synchronizes the
+released memory through each consumer, while the component lemmas above
+discharge every semantic invariant from the exact checked pending successor. -/
+theorem derive_retired_memory_authoritative_candidate_preserves_runtime
+    state completion object after
+    (hinvariant : ∀ pending,
+      state.pending = some (.cleanup pending) →
+        pending.logicalAfter.Invariant)
+    (hissued : ∀ pending,
+      state.pending = some (.cleanup pending) →
+        pending.logicalAfter.kernel.ipc.endpoints.issued =
+          pending.logicalAfter.scrub.memory.issued)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate state completion object =
+        some after) :
+    FailStop.AuthoritativeRuntimeWellFormed after.kernel := by
+  have hexecution :=
+    derive_retired_memory_authoritative_candidate_preserves_execution
+      state completion object after hinvariant hderived
+  have hlifecycle :=
+    derive_retired_memory_authoritative_candidate_preserves_subject_lifecycle
+      state completion object after hinvariant hderived
+  have hcapabilities :=
+    derive_retired_memory_authoritative_candidate_capabilities_well_formed
+      state completion object after hderived
+  have hvirtual :=
+    derive_retired_memory_authoritative_candidate_preserves_virtual_lifecycle
+      state completion object after hinvariant hderived
+  have hscheduler :=
+    derive_retired_memory_authoritative_candidate_preserves_scheduler
+      state completion object after hinvariant hderived
+  have hpreemption :=
+    derive_retired_memory_authoritative_candidate_preserves_preemption
+      state completion object after hinvariant hderived
+  have hresumable :=
+    derive_retired_memory_authoritative_candidate_preserves_resumable
+      state completion object after hinvariant hderived
+  have hipc :=
+    derive_retired_memory_authoritative_candidate_preserves_ipc_authority
+      state completion object after hinvariant hissued hderived
+  have hblocking :=
+    derive_retired_memory_authoritative_candidate_preserves_blocking_ipc_coherence
+      state completion object after hderived
+  have hdeferred :=
+    derive_retired_memory_authoritative_candidate_preserves_deferred_cancellation
+      state completion object after hinvariant hderived
+  have hcontrols :=
+    derive_retired_memory_authoritative_candidate_preserves_machine_controls
+      state completion object after hinvariant hderived
+  have hpublication :=
+    derive_retired_memory_authoritative_candidate_preserves_invalidation_publication
+      state completion object after hinvariant hderived
+  refine ⟨?_, hdeferred, hpublication⟩
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt _hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      split at hderived <;> try contradiction
+      next released hreleased =>
+        have hbefore := hinvariant pending hpending
+        have hcoherent := hbefore.1.left.1
+        have hhalted := hbefore.1.left.2.2.2.2.2.2.2.2.2.2.1
+        have hreleasedCapabilities :=
+          release_retired_memory_with_receipt_preserves_capabilities
+            pending.logicalAfter.scrub receipt released hreleased
+        have houterCoherent := hbefore.2.2
+        rcases houterCoherent with ⟨_, _, hscrubMemory, _⟩
+        have hvirtualCapabilities := hcoherent.2.2.2.2.1
+        have hcapabilityEquality :
+            released.memory.capabilities =
+              pending.logicalAfter.kernel.lifecycle.capabilities := by
+          calc
+            released.memory.capabilities =
+                pending.logicalAfter.scrub.memory.capabilities :=
+              hreleasedCapabilities
+            _ = pending.logicalAfter.kernel.virtualMemory.memory.capabilities :=
+              congrArg (fun memory => memory.capabilities) hscrubMemory
+            _ = pending.logicalAfter.kernel.lifecycle.capabilities :=
+              hvirtualCapabilities
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            refine ⟨?_, hexecution, hlifecycle, hcapabilities, hvirtual,
+              hipc.1, hscheduler, hpreemption, hresumable, hipc.2, ?_, ?_,
+              hblocking, hcontrols⟩
+            · rcases hcoherent with
+                ⟨_, _, _, _, _, _, _, _, _, _, hcurrent, hmailbox, hlive⟩
+              have hmailboxFalse : ∀ candidate,
+                  pending.logicalAfter.kernel.lifecycle.capabilities.objects
+                      candidate = false →
+                    pending.logicalAfter.kernel.ipc.endpoints.mailbox
+                      candidate = none := by
+                intro candidate hfalse
+                exact hmailbox candidate (by simp [hfalse])
+              simpa [publishRetiredMemoryKernel,
+                FailStop.CompositeState.Coherent,
+                hcapabilityEquality] using ⟨hcurrent, hmailboxFalse, hlive⟩
+            · simpa [publishRetiredMemoryKernel] using hhalted
+            · simp [publishRetiredMemoryKernel]
+
+/-- Receipt consumption preserves the scrub invariant when the retired frame
+has one authoritative binding.  This isolates the allocator/binding proof
+needed by the later cross-projection publication theorem: removing the retired
+binding makes its old bytes irrelevant, while every other binding keeps both
+its allocator ownership and its byte evidence. -/
+theorem release_retired_memory_with_receipt_preserves_scrub_invariant
+    state receipt released
+    (hinvariant : FrameScrub.ScrubInvariant state)
+    (hunique : ∀ object,
+      state.memory.binding object = some receipt.frame →
+        object = receipt.object)
+    (hreleased :
+      releaseRetiredMemoryWithReceipt state receipt = some released) :
+    FrameScrub.ScrubInvariant released := by
+  simp only [releaseRetiredMemoryWithReceipt] at hreleased
+  split at hreleased <;> try contradiction
+  next hexact =>
+    split at hreleased <;> try contradiction
+    next allocator hallocator =>
+      injection hreleased with heq
+      subst released
+      intro object frame hbinding hunwritten
+      have hobject : object ≠ receipt.object := by
+        intro heq
+        subst object
+        simp [MemoryLifecycle.setBinding] at hbinding
+      have hbindingBefore : state.memory.binding object = some frame := by
+        simpa [MemoryLifecycle.setBinding, hobject] using hbinding
+      have hbefore := hinvariant object frame hbindingBefore hunwritten
+      have hframe : frame ≠ receipt.frame := by
+        intro heq
+        subst frame
+        exact hobject (hunique object hbindingBefore)
+      refine ⟨?_, hbefore.2⟩
+      simp only [FrameAllocator.release] at hallocator
+      split at hallocator <;> try contradiction
+      injection hallocator with heq
+      subst allocator
+      simpa [FrameAllocator.IsOwnedBy, FrameAllocator.setStatus, hframe] using
+        hbefore.1
+
+/-- Well-formed authoritative memory discharges the single-binding premise
+needed by receipt release.  Both a competing binding and the receipt binding
+would make the same allocator frame owned by two different objects, which the
+allocator's functional status projection forbids. -/
+theorem release_retired_memory_with_receipt_preserves_scrub_invariant_of_well_formed
+    state receipt released
+    (hinvariant : FrameScrub.ScrubInvariant state)
+    (hwell : MemoryLifecycle.WellFormed state.memory)
+    (hreleased :
+      releaseRetiredMemoryWithReceipt state receipt = some released) :
+    FrameScrub.ScrubInvariant released := by
+  apply release_retired_memory_with_receipt_preserves_scrub_invariant
+    state receipt released hinvariant
+  · intro object hbinding
+    have hreceiptBinding :
+        state.memory.binding receipt.object = some receipt.frame := by
+      simp only [releaseRetiredMemoryWithReceipt] at hreleased
+      split at hreleased <;> try contradiction
+      next hexact => exact hexact.1
+    have hobjectOwned := (hwell.2.2.1 object receipt.frame hbinding).2.1
+    have hreceiptOwned :=
+      (hwell.2.2.1 receipt.object receipt.frame hreceiptBinding).2.1
+    exact FrameAllocator.ownership_exclusive state.memory.allocator
+      receipt.frame object receipt.object hobjectOwned hreceiptOwned
+  · exact hreleased
+
+/-- A successful authoritative release candidate inherits scrub safety from
+the exact pending logical successor.  The premises are indexed by the pending
+record exposed by the front door, so callers cannot supply invariant evidence
+for a different successor than the one whose receipt is consumed. -/
+theorem derive_retired_memory_authoritative_candidate_preserves_scrub_invariant
+    state completion object after
+    (hinvariant : ∀ pending,
+      state.pending = some (.cleanup pending) →
+        FrameScrub.ScrubInvariant pending.logicalAfter.scrub)
+    (hwell : ∀ pending,
+      state.pending = some (.cleanup pending) →
+        MemoryLifecycle.WellFormed pending.logicalAfter.scrub.memory)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate state completion object =
+        some after) :
+    FrameScrub.ScrubInvariant after.scrub := by
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt _hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      split at hderived <;> try contradiction
+      next released hreleased =>
+        have hscrub :=
+          release_retired_memory_with_receipt_preserves_scrub_invariant_of_well_formed
+            pending.logicalAfter.scrub receipt released
+            (hinvariant pending hpending) (hwell pending hpending) hreleased
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            exact hscrub
+
+/-- The checked cleanup successor already carries the scrub half of the
+release-candidate invariant.  This is projected from the published outer
+invariant rather than recomputed from a caller-selected memory state. -/
+theorem subject_termination_checked_after_scrub_invariant
+    (plan : BootPageTablePlan.Plan) :
+    FrameScrub.ScrubInvariant (subjectTerminationCheckedAfter plan).scrub := by
+  exact (subject_termination_checked_after_invariant plan).2.2.2.2.2.2.1
+
+/-- Canonical subject termination keeps the endpoint issuance history aligned
+with the scrub-memory projection consumed by retired-frame publication. -/
+theorem subject_termination_checked_after_ipc_scrub_issued
+    (plan : BootPageTablePlan.Plan) :
+    (subjectTerminationCheckedAfter plan).kernel.ipc.endpoints.issued =
+      (subjectTerminationCheckedAfter plan).scrub.memory.issued := by
+  rw [subject_termination_checked_apply_eq_reconciled_candidate plan]
+  rfl
+
+/-- Canonical subject termination retains exactly one binding to retired DMA
+frame 4.  This concrete fact supplies the release proof's uniqueness premise
+without falsely claiming the pre-release memory state is lifecycle-well-formed:
+object 20 is deliberately retired while its binding awaits receipt consumption. -/
+theorem subject_termination_checked_after_retired_frame_binding_unique
+    (plan : BootPageTablePlan.Plan) :
+    ∀ object,
+      (subjectTerminationCheckedAfter plan).scrub.memory.binding object =
+          some 4 →
+        object = 20 := by
+  intro object hbinding
+  have hbindingKernel :
+      (subjectTerminationCheckedKernelAfter plan).virtualMemory.memory.binding
+          object = some 4 := by
+    rw [subject_termination_checked_apply_eq_reconciled_candidate plan] at hbinding
+    simpa [reconcileScrubMemory] using hbinding
+  have hbindingRetired :
+      (subjectTerminationCheckedKernelAfter plan).virtualMemory.memory.binding
+          20 = some 4 := by
+    simpa [subjectTerminationCheckedKernelAfter,
+      subjectTerminationCheckedBefore, authoritativeSample] using
+      (FailStop.compositeDispatcherTerminateSubjectTwo_requires_explicit_memory_release
+        plan).1
+  have howned := subject_termination_checked_kernel_binding_owned plan
+  exact FrameAllocator.ownership_exclusive
+    (subjectTerminationCheckedKernelAfter plan).virtualMemory.memory.allocator
+    4 object 20 (howned object 4 hbindingKernel)
+    (howned 20 4 hbindingRetired)
+
+/-- The real prepared subject-termination ticket supplies both invariant
+premises required by the generic receipt-consuming constructor.  Therefore
+every successful canonical authoritative release candidate preserves scrub
+safety without accepting invariant evidence for a different pending state. -/
+theorem subject_termination_checked_retired_memory_candidate_scrub_invariant
+    (plan : BootPageTablePlan.Plan) (after : AuthoritativeExtension)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate
+        (prepareAuthoritativePublication
+          (subjectTerminationCheckedAuthoritativePublicationState plan)
+          (subject_termination_checked_before_invariant plan)
+          (.cleanup (.ordinary (.terminateSubject 2)))).state
+        subjectTerminationWitnessCompletion 20 = some after) :
+    FrameScrub.ScrubInvariant after.scrub := by
+  have hremoved :=
+    subject_termination_checked_apply_removes_device_authority plan
+  have hscopes := subject_termination_checked_removed_authority_scopes plan
+    (subjectTerminationCheckedAfter plan) hremoved.2 hremoved.1
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      have hpending' := hpending
+      simp only [prepareAuthoritativePublication,
+        prepareAuthorityCleanupPublication,
+        subjectTerminationCheckedAuthoritativePublicationState] at hpending'
+      rw [show applyKernelOperation (subjectTerminationCheckedBefore plan)
+          (.ordinary (.terminateSubject 2)) =
+            subjectTerminationCheckedAfter plan by rfl] at hpending'
+      rw [hscopes] at hpending'
+      simp [subjectTerminationWitnessScopes] at hpending'
+      subst pending
+      split at hderived <;> try contradiction
+      next released hreleased =>
+        have hreceiptExact :=
+          derived_retired_memory_release_receipt_is_exact
+            (prepareAuthoritativePublication
+              (subjectTerminationCheckedAuthoritativePublicationState plan)
+              (subject_termination_checked_before_invariant plan)
+              (.cleanup (.ordinary (.terminateSubject 2)))).state
+            subjectTerminationWitnessCompletion 20 receipt hreceipt
+        have hframe : receipt.frame = 4 := by
+          have hbinding := hreceiptExact.2.1
+          have hretains :=
+            (prepare_authoritative_publication_retains_publications
+              (subjectTerminationCheckedAuthoritativePublicationState plan)
+              (subject_termination_checked_before_invariant plan)
+              (.cleanup (.ordinary (.terminateSubject 2)))).1
+          rw [hretains] at hbinding
+          change (if (20 : MemoryLifecycle.ObjectId) = 20 then some 4 else none) =
+            some receipt.frame at hbinding
+          simpa using hbinding.symm
+        have hscrub :=
+          release_retired_memory_with_receipt_preserves_scrub_invariant
+            (subjectTerminationCheckedAfter plan).scrub receipt released
+            (subject_termination_checked_after_scrub_invariant plan)
+            (by
+              intro candidate hbinding
+              rw [hframe] at hbinding
+              have hcandidate :=
+                subject_termination_checked_after_retired_frame_binding_unique
+                  plan candidate hbinding
+              exact hcandidate.trans hreceiptExact.1.symm)
+            hreleased
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            exact hscrub
+
+/-- The concrete prepared termination ticket supplies the endpoint/scrub
+issuance coherence needed by the generic release constructor, so a successful
+canonical retired-memory candidate preserves both IPC authority surfaces. -/
+theorem subject_termination_checked_retired_memory_candidate_preserves_ipc_authority
+    (plan : BootPageTablePlan.Plan) (after : AuthoritativeExtension)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate
+        (prepareAuthoritativePublication
+          (subjectTerminationCheckedAuthoritativePublicationState plan)
+          (subject_termination_checked_before_invariant plan)
+          (.cleanup (.ordinary (.terminateSubject 2)))).state
+        subjectTerminationWitnessCompletion 20 = some after) :
+    IPCSyscall.WellFormed after.kernel.ipc ∧
+      CapabilityTransfer.WellFormed after.kernel.transfers := by
+  have hremoved :=
+    subject_termination_checked_apply_removes_device_authority plan
+  have hscopes := subject_termination_checked_removed_authority_scopes plan
+    (subjectTerminationCheckedAfter plan) hremoved.2 hremoved.1
+  apply derive_retired_memory_authoritative_candidate_preserves_ipc_authority
+      _ _ _ _ (hderived := hderived)
+  · intro pending hpending
+    simp only [prepareAuthoritativePublication,
+      prepareAuthorityCleanupPublication,
+      subjectTerminationCheckedAuthoritativePublicationState] at hpending
+    rw [show applyKernelOperation (subjectTerminationCheckedBefore plan)
+        (.ordinary (.terminateSubject 2)) =
+          subjectTerminationCheckedAfter plan by rfl] at hpending
+    rw [hscopes] at hpending
+    simp [subjectTerminationWitnessScopes] at hpending
+    subst pending
+    exact subject_termination_checked_after_invariant plan
+  · intro pending hpending
+    simp only [prepareAuthoritativePublication,
+      prepareAuthorityCleanupPublication,
+      subjectTerminationCheckedAuthoritativePublicationState] at hpending
+    rw [show applyKernelOperation (subjectTerminationCheckedBefore plan)
+        (.ordinary (.terminateSubject 2)) =
+          subjectTerminationCheckedAfter plan by rfl] at hpending
+    rw [hscopes] at hpending
+    simp [subjectTerminationWitnessScopes] at hpending
+    subst pending
+    exact subject_termination_checked_after_ipc_scrub_issued plan
+
+/-- The concrete prepared termination ticket instantiates the generic runtime
+preservation theorem.  A successful retired-memory candidate therefore keeps
+the complete authoritative kernel invariant without accepting a detached
+runtime premise from its caller. -/
+theorem subject_termination_checked_retired_memory_candidate_preserves_runtime
+    (plan : BootPageTablePlan.Plan) (after : AuthoritativeExtension)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate
+        (prepareAuthoritativePublication
+          (subjectTerminationCheckedAuthoritativePublicationState plan)
+          (subject_termination_checked_before_invariant plan)
+          (.cleanup (.ordinary (.terminateSubject 2)))).state
+        subjectTerminationWitnessCompletion 20 = some after) :
+    FailStop.AuthoritativeRuntimeWellFormed after.kernel := by
+  have hremoved :=
+    subject_termination_checked_apply_removes_device_authority plan
+  have hscopes := subject_termination_checked_removed_authority_scopes plan
+    (subjectTerminationCheckedAfter plan) hremoved.2 hremoved.1
+  apply derive_retired_memory_authoritative_candidate_preserves_runtime
+      _ _ _ _ (hderived := hderived)
+  · intro pending hpending
+    simp only [prepareAuthoritativePublication,
+      prepareAuthorityCleanupPublication,
+      subjectTerminationCheckedAuthoritativePublicationState] at hpending
+    rw [show applyKernelOperation (subjectTerminationCheckedBefore plan)
+        (.ordinary (.terminateSubject 2)) =
+          subjectTerminationCheckedAfter plan by rfl] at hpending
+    rw [hscopes] at hpending
+    simp [subjectTerminationWitnessScopes] at hpending
+    subst pending
+    exact subject_termination_checked_after_invariant plan
+  · intro pending hpending
+    simp only [prepareAuthoritativePublication,
+      prepareAuthorityCleanupPublication,
+      subjectTerminationCheckedAuthoritativePublicationState] at hpending
+    rw [show applyKernelOperation (subjectTerminationCheckedBefore plan)
+        (.ordinary (.terminateSubject 2)) =
+          subjectTerminationCheckedAfter plan by rfl] at hpending
+    rw [hscopes] at hpending
+    simp [subjectTerminationWitnessScopes] at hpending
+    subst pending
+    exact subject_termination_checked_after_ipc_scrub_issued plan
+
+/-- The canonical receipt-derived release candidate also closes the final
+cross-projection authority gate.  The release publisher changes only the
+retired binding/allocator entry, filters the matching device capability, and
+keeps every owner-bearing IOMMU inventory on the checked termination
+successor. -/
+theorem subject_termination_checked_retired_memory_candidate_coherent
+    (plan : BootPageTablePlan.Plan) (after : AuthoritativeExtension)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate
+        (prepareAuthoritativePublication
+          (subjectTerminationCheckedAuthoritativePublicationState plan)
+          (subject_termination_checked_before_invariant plan)
+          (.cleanup (.ordinary (.terminateSubject 2)))).state
+        subjectTerminationWitnessCompletion 20 = some after) :
+    after.Coherent := by
+  have hscrub :=
+    subject_termination_checked_retired_memory_candidate_scrub_invariant
+      plan after hderived
+  have hremoved :=
+    subject_termination_checked_apply_removes_device_authority plan
+  have hscopes := subject_termination_checked_removed_authority_scopes plan
+    (subjectTerminationCheckedAfter plan) hremoved.2 hremoved.1
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt _hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      simp only [prepareAuthoritativePublication,
+        prepareAuthorityCleanupPublication,
+        subjectTerminationCheckedAuthoritativePublicationState] at hpending
+      rw [show applyKernelOperation (subjectTerminationCheckedBefore plan)
+          (.ordinary (.terminateSubject 2)) =
+            subjectTerminationCheckedAfter plan by rfl] at hpending
+      rw [hscopes] at hpending
+      simp [subjectTerminationWitnessScopes] at hpending
+      subst pending
+      split at hderived <;> try contradiction
+      next released hreleased =>
+        have hbefore := subject_termination_checked_after_invariant plan
+        rcases hbefore.2.2 with
+          ⟨howner, _hauthority, hscrubMemory, _hiommuMemory,
+            _hscrubBefore, _hassignments, _hcapabilities, _hmappings,
+            hframes⟩
+        have hkernelCoherent := hbefore.1.left.1
+        have hreleasedCapabilities :=
+          release_retired_memory_with_receipt_preserves_capabilities
+            (subjectTerminationCheckedAfter plan).scrub receipt released
+            hreleased
+        have hsubjectRegistry :
+            released.memory.capabilities.subjects =
+              (subjectTerminationCheckedAfter plan).kernel.capabilities.subjects := by
+          apply congrArg (fun (capabilities : LeanOS.Capability.State) =>
+            capabilities.subjects)
+          calc
+            released.memory.capabilities =
+                (subjectTerminationCheckedAfter plan).scrub.memory.capabilities :=
+              hreleasedCapabilities
+            _ = (subjectTerminationCheckedAfter plan).kernel.virtualMemory.memory.capabilities :=
+              congrArg (fun memory => memory.capabilities) hscrubMemory
+            _ = (subjectTerminationCheckedAfter plan).kernel.lifecycle.capabilities :=
+              hkernelCoherent.2.2.2.2.1
+            _ = (subjectTerminationCheckedAfter plan).kernel.capabilities :=
+              hkernelCoherent.2.2.2.1.symm
+        have hdeviceCapabilities :
+            (subjectTerminationCheckedAfter plan).iommu.core.capabilities = [] := by
+          rw [subject_termination_checked_apply_eq_reconciled_candidate plan]
+          change (reconcileKernelAuthority
+            (subjectTerminationCheckedKernelAfter plan)
+            (subjectTerminationCheckedBefore plan).iommu).core.capabilities = []
+          rw [subject_termination_checked_reconcile_core_eq_candidate plan]
+          rfl
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            rw [AuthoritativeExtension.Coherent]
+            refine ⟨?_, rfl, rfl, rfl, hscrub, ?_, ?_, ?_, ?_⟩
+            · simpa [publishRetiredMemoryKernel,
+                retiredMemoryReleaseCore] using howner
+            · simp [retiredMemoryReleaseCore, hremoved.1]
+            · simp [retiredMemoryReleaseCore, hdeviceCapabilities]
+            · simp [retiredMemoryReleaseCore, hremoved.2]
+            · intro frame hframe hlive hkernel hpage hmetadata
+              have hframeBefore := hframes frame
+                (by simpa [retiredMemoryReleaseCore] using hframe)
+                hlive hkernel hpage hmetadata
+              change released.memory.capabilities.subjects frame.owner = true
+              rw [hsubjectRegistry]
+              exact hframeBefore
+
+/-- The exact canonical receipt-derived candidate now satisfies the complete
+outer publication invariant.  Runtime well-formedness, validated IOMMU state,
+and cross-projection coherence are all derived from the same successful
+constructor result rather than supplied as detached caller evidence. -/
+theorem subject_termination_checked_retired_memory_candidate_invariant
+    (plan : BootPageTablePlan.Plan) (after : AuthoritativeExtension)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate
+        (prepareAuthoritativePublication
+          (subjectTerminationCheckedAuthoritativePublicationState plan)
+          (subject_termination_checked_before_invariant plan)
+          (.cleanup (.ordinary (.terminateSubject 2)))).state
+        subjectTerminationWitnessCompletion 20 = some after) :
+    after.Invariant := by
+  exact ⟨
+    subject_termination_checked_retired_memory_candidate_preserves_runtime
+      plan after hderived,
+    after.iommu.invariant,
+    subject_termination_checked_retired_memory_candidate_coherent
+      plan after hderived⟩
+
+/-- The canonical checked termination does not merely make the retired-memory
+constructor safe conditionally: its exact ticket, scopes, binding, and
+validated successor produce a concrete invariant-bearing release candidate. -/
+theorem subject_termination_checked_retired_memory_candidate_exists
+    (plan : BootPageTablePlan.Plan) :
+    ∃ after,
+      deriveRetiredMemoryAuthoritativeCandidate
+        (prepareAuthoritativePublication
+          (subjectTerminationCheckedAuthoritativePublicationState plan)
+          (subject_termination_checked_before_invariant plan)
+          (.cleanup (.ordinary (.terminateSubject 2)))).state
+        subjectTerminationWitnessCompletion 20 = some after ∧
+      after.Invariant := by
+  have hremoved :=
+    subject_termination_checked_apply_removes_device_authority plan
+  have hscopes := subject_termination_checked_removed_authority_scopes plan
+    (subjectTerminationCheckedAfter plan) hremoved.2 hremoved.1
+  have hbindingKernel :
+      (subjectTerminationCheckedKernelAfter plan).virtualMemory.memory.binding
+          20 = some 4 := by
+    simpa [subjectTerminationCheckedKernelAfter,
+      subjectTerminationCheckedBefore, authoritativeSample] using
+      (FailStop.compositeDispatcherTerminateSubjectTwo_requires_explicit_memory_release
+        plan).1
+  have hbindingAfter :
+      (subjectTerminationCheckedAfter plan).scrub.memory.binding 20 = some 4 := by
+    rw [subject_termination_checked_apply_scrub_memory_coherent,
+      subject_termination_checked_apply_eq_reconciled_candidate]
+    exact hbindingKernel
+  have hretiredAfter :
+      (subjectTerminationCheckedAfter plan).scrub.memory.capabilities.objects
+          20 = false := by
+    rw [subject_termination_checked_apply_eq_reconciled_candidate]
+    simpa [reconcileScrubMemory, subjectTerminationCheckedKernelAfter,
+      subjectTerminationCheckedBefore, authoritativeSample] using
+      FailStop.compositeDispatcherTerminateSubjectTwo_retires_memory_object plan
+  have hownedAfter :
+      FrameAllocator.IsOwnedBy
+        (subjectTerminationCheckedAfter plan).scrub.memory.allocator 4 20 := by
+    rw [subject_termination_checked_apply_eq_reconciled_candidate]
+    exact subject_termination_checked_kernel_binding_owned plan 20 4 hbindingKernel
+  have hstatusAfter :
+      (subjectTerminationCheckedAfter plan).scrub.memory.allocator.status 4 =
+        .owned 20 := hownedAfter
+  have hbindingBefore :
+      (authoritativeSampleScrub plan).memory.binding 20 = some 4 := by
+    rfl
+  have hliveBefore :
+      (authoritativeSampleScrub plan).memory.capabilities.objects 20 = true := by
+    rfl
+  let released : FrameScrub.State :=
+    { memory :=
+        { (subjectTerminationCheckedAfter plan).scrub.memory with
+          allocator := FrameAllocator.setStatus
+            (subjectTerminationCheckedAfter plan).scrub.memory.allocator 4 .free
+          binding := MemoryLifecycle.setBinding
+            (subjectTerminationCheckedAfter plan).scrub.memory.binding 20 none }
+      bytes := (subjectTerminationCheckedAfter plan).scrub.bytes
+      written := (subjectTerminationCheckedAfter plan).scrub.written }
+  let core := retiredMemoryReleaseCore
+    (subjectTerminationCheckedAfter plan).iommu.core released 20
+  have hbefore := subject_termination_checked_after_invariant plan
+  have hkernelCoherent := hbefore.1.left.1
+  have hscrubMemory := hbefore.2.2.2.2.1
+  have hcapability : LeanOS.Capability.WellFormed core.capabilityAuthority := by
+    have heq : released.memory.capabilities =
+        (subjectTerminationCheckedKernelAfter plan).capabilities := by
+      calc
+        released.memory.capabilities =
+            (subjectTerminationCheckedAfter plan).scrub.memory.capabilities := rfl
+        _ = (subjectTerminationCheckedAfter plan).kernel.virtualMemory.memory.capabilities :=
+          congrArg (fun memory => memory.capabilities) hscrubMemory
+        _ = (subjectTerminationCheckedAfter plan).kernel.lifecycle.capabilities :=
+          hkernelCoherent.2.2.2.2.1
+        _ = (subjectTerminationCheckedAfter plan).kernel.capabilities :=
+          hkernelCoherent.2.2.2.1.symm
+        _ = (subjectTerminationCheckedKernelAfter plan).capabilities := by
+          rw [subject_termination_checked_apply_eq_reconciled_candidate]
+    simpa [core, retiredMemoryReleaseCore, heq] using
+      subject_termination_checked_candidate_capability_well_formed plan
+  have hremovedCandidate :
+      (subjectTerminationCheckedReconcileCandidate plan).assignments = [] ∧
+        (subjectTerminationCheckedReconcileCandidate plan).mappings = [] := by
+    rw [← subject_termination_checked_reconcile_core_eq_candidate]
+    simpa [subject_termination_checked_apply_eq_reconciled_candidate] using hremoved
+  have hcapabilitiesCandidate :
+      (subjectTerminationCheckedReconcileCandidate plan).capabilities = [] := by
+    rfl
+  have hvalid : validateCore core = true := by
+    dsimp [core]
+    rw [subject_termination_checked_apply_eq_reconciled_candidate]
+    rw [subject_termination_checked_reconcile_core_eq_candidate]
+    have hcandidateValid :=
+      subject_termination_checked_reconcile_candidate_valid plan
+    simpa [retiredMemoryReleaseCore, validateCore, hremovedCandidate.1,
+      hremovedCandidate.2, hcapabilitiesCandidate] using hcandidateValid
+  let after : AuthoritativeExtension :=
+    { kernel := publishRetiredMemoryKernel
+        (subjectTerminationCheckedAfter plan).kernel released.memory
+      iommu := ⟨core, hvalid, hcapability⟩
+      scrub := released }
+  have hderived :
+      deriveRetiredMemoryAuthoritativeCandidate
+        (prepareAuthoritativePublication
+          (subjectTerminationCheckedAuthoritativePublicationState plan)
+          (subject_termination_checked_before_invariant plan)
+          (.cleanup (.ordinary (.terminateSubject 2)))).state
+        subjectTerminationWitnessCompletion 20 = some after := by
+    simp only [deriveRetiredMemoryAuthoritativeCandidate,
+      prepareAuthoritativePublication, prepareAuthorityCleanupPublication,
+      subjectTerminationCheckedAuthoritativePublicationState]
+    rw [show applyKernelOperation (subjectTerminationCheckedBefore plan)
+        (.ordinary (.terminateSubject 2)) =
+          subjectTerminationCheckedAfter plan by rfl]
+    rw [hscopes]
+    simp [deriveRetiredMemoryReleaseReceipt, subjectTerminationWitnessCompletion,
+      subjectTerminationWitnessScopes, releaseRetiredMemoryWithReceipt,
+      subjectTerminationCheckedBefore, authoritativeSample, hbindingBefore,
+      hliveBefore, hbindingAfter, hretiredAfter, FrameAllocator.release,
+      hstatusAfter, released, core, after, hcapability, hvalid]
+  exact ⟨after, hderived,
+    subject_termination_checked_retired_memory_candidate_invariant
+      plan after hderived⟩
+
+/-- Every successful canonical release candidate has crossed the concrete
+allocator boundary: object 20 no longer names its retired backing frame and
+frame 4 is genuinely free.  These are constructor-derived facts for the
+invariant-bearing successor, not premises supplied to the later fresh-lifetime
+allocation proof. -/
+theorem subject_termination_checked_retired_memory_candidate_releases_frame
+    (plan : BootPageTablePlan.Plan) (after : AuthoritativeExtension)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate
+        (prepareAuthoritativePublication
+          (subjectTerminationCheckedAuthoritativePublicationState plan)
+          (subject_termination_checked_before_invariant plan)
+          (.cleanup (.ordinary (.terminateSubject 2)))).state
+        subjectTerminationWitnessCompletion 20 = some after) :
+    after.scrub.memory.binding 20 = none ∧
+      FrameAllocator.IsFree after.scrub.memory.allocator 4 := by
+  have hremoved :=
+    subject_termination_checked_apply_removes_device_authority plan
+  have hscopes := subject_termination_checked_removed_authority_scopes plan
+    (subjectTerminationCheckedAfter plan) hremoved.2 hremoved.1
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      have hpending' := hpending
+      simp only [prepareAuthoritativePublication,
+        prepareAuthorityCleanupPublication,
+        subjectTerminationCheckedAuthoritativePublicationState] at hpending'
+      rw [show applyKernelOperation (subjectTerminationCheckedBefore plan)
+          (.ordinary (.terminateSubject 2)) =
+            subjectTerminationCheckedAfter plan by rfl] at hpending'
+      rw [hscopes] at hpending'
+      simp [subjectTerminationWitnessScopes] at hpending'
+      subst pending
+      split at hderived <;> try contradiction
+      next released hreleased =>
+        have hreceiptExact :=
+          derived_retired_memory_release_receipt_is_exact
+            (prepareAuthoritativePublication
+              (subjectTerminationCheckedAuthoritativePublicationState plan)
+              (subject_termination_checked_before_invariant plan)
+              (.cleanup (.ordinary (.terminateSubject 2)))).state
+            subjectTerminationWitnessCompletion 20 receipt hreceipt
+        have hframe : receipt.frame = 4 := by
+          have hbinding := hreceiptExact.2.1
+          have hretains :=
+            (prepare_authoritative_publication_retains_publications
+              (subjectTerminationCheckedAuthoritativePublicationState plan)
+              (subject_termination_checked_before_invariant plan)
+              (.cleanup (.ordinary (.terminateSubject 2)))).1
+          rw [hretains] at hbinding
+          change (if (20 : MemoryLifecycle.ObjectId) = 20 then some 4 else none) =
+            some receipt.frame at hbinding
+          simpa using hbinding.symm
+        have hexact :=
+          release_retired_memory_with_receipt_exact
+            (subjectTerminationCheckedAfter plan).scrub receipt released
+            hreleased
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            exact ⟨
+              by simpa [hreceiptExact.1] using hexact.1,
+              by simpa [hframe] using hexact.2.1⟩
+
+/-- The exact invariant-bearing retired-memory successor admits the next real
+allocation transition.  Object 21 is published on the reclaimed frame 4 only
+through `FrameScrub.allocate`, so acceptance, the new binding, and zeroed
+fresh contents are consequences of the constructor-derived successor rather
+than caller-supplied release or scrub premises. -/
+theorem subject_termination_checked_retired_memory_candidate_allocates_fresh
+    (plan : BootPageTablePlan.Plan) (after : AuthoritativeExtension)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate
+        (prepareAuthoritativePublication
+          (subjectTerminationCheckedAuthoritativePublicationState plan)
+          (subject_termination_checked_before_invariant plan)
+          (.cleanup (.ordinary (.terminateSubject 2)))).state
+        subjectTerminationWitnessCompletion 20 = some after) :
+    (FrameScrub.allocate after.scrub 21 1 2).result = .accepted ∧
+      (FrameScrub.allocate after.scrub 21 1 2).state.memory.binding 21 = some 4 ∧
+      FrameScrub.Fresh (FrameScrub.allocate after.scrub 21 1 2).state 21 := by
+  have hremoved :=
+    subject_termination_checked_apply_removes_device_authority plan
+  have hscopes := subject_termination_checked_removed_authority_scopes plan
+    (subjectTerminationCheckedAfter plan) hremoved.2 hremoved.1
+  simp only [deriveRetiredMemoryAuthoritativeCandidate] at hderived
+  split at hderived <;> try contradiction
+  next receipt hreceipt =>
+    split at hderived <;> try contradiction
+    next pending hpending =>
+      have hpending' := hpending
+      simp only [prepareAuthoritativePublication,
+        prepareAuthorityCleanupPublication,
+        subjectTerminationCheckedAuthoritativePublicationState] at hpending'
+      rw [show applyKernelOperation (subjectTerminationCheckedBefore plan)
+          (.ordinary (.terminateSubject 2)) =
+            subjectTerminationCheckedAfter plan by rfl] at hpending'
+      rw [hscopes] at hpending'
+      simp [subjectTerminationWitnessScopes] at hpending'
+      subst pending
+      split at hderived <;> try contradiction
+      next released hreleased =>
+        have hreceiptExact :=
+          derived_retired_memory_release_receipt_is_exact
+            (prepareAuthoritativePublication
+              (subjectTerminationCheckedAuthoritativePublicationState plan)
+              (subject_termination_checked_before_invariant plan)
+              (.cleanup (.ordinary (.terminateSubject 2)))).state
+            subjectTerminationWitnessCompletion 20 receipt hreceipt
+        have hframe : receipt.frame = 4 := by
+          have hbinding := hreceiptExact.2.1
+          have hretains :=
+            (prepare_authoritative_publication_retains_publications
+              (subjectTerminationCheckedAuthoritativePublicationState plan)
+              (subject_termination_checked_before_invariant plan)
+              (.cleanup (.ordinary (.terminateSubject 2)))).1
+          rw [hretains] at hbinding
+          change (if (20 : MemoryLifecycle.ObjectId) = 20 then some 4 else none) =
+            some receipt.frame at hbinding
+          simpa using hbinding.symm
+        have hexact :=
+          release_retired_memory_with_receipt_exact
+            (subjectTerminationCheckedAfter plan).scrub receipt released
+            hreleased
+        split at hderived <;> try contradiction
+        next _hcapability =>
+          split at hderived <;> try contradiction
+          next _hvalid =>
+            injection hderived with heq
+            subst after
+            simp only [releaseRetiredMemoryWithReceipt] at hreleased
+            split at hreleased <;> try contradiction
+            next _hexact =>
+              split at hreleased <;> try contradiction
+              next allocator hallocator =>
+                injection hreleased with hreleasedEq
+                subst released
+                have hallocatorEq :
+                    allocator = FrameAllocator.setStatus
+                      (subjectTerminationCheckedAfter plan).scrub.memory.allocator
+                      receipt.frame .free := by
+                  simp only [FrameAllocator.release] at hallocator
+                  split at hallocator <;> try contradiction
+                  next _howned =>
+                    injection hallocator with heq
+                    exact heq.symm
+                have hmemory :
+                    (subjectTerminationCheckedAfter plan).scrub.memory =
+                      (FailStop.authoritativeGate
+                        (FailStop.compositeDispatcherInitial plan)
+                        (.ordinary (.terminateSubject 2))).state.virtualMemory.memory := by
+                  rw [subject_termination_checked_apply_scrub_memory_coherent]
+                  rw [subject_termination_checked_apply_eq_reconciled_candidate]
+                  simp [subjectTerminationCheckedKernelAfter,
+                    subjectTerminationCheckedBefore, authoritativeSample,
+                    FailStop.authoritativeGate_ordinary_state]
+                have hallocation :=
+                  FailStop.compositeDispatcherTerminateSubjectTwo_released_memory_allocates_fresh
+                    plan
+                dsimp only at hallocation
+                rw [← hmemory] at hallocation
+                have hreleasedMemory :
+                    { (subjectTerminationCheckedAfter plan).scrub.memory with
+                        allocator
+                        binding := MemoryLifecycle.setBinding
+                          (subjectTerminationCheckedAfter plan).scrub.memory.binding
+                          receipt.object none } =
+                      { (subjectTerminationCheckedAfter plan).scrub.memory with
+                        allocator := FrameAllocator.setStatus
+                          (subjectTerminationCheckedAfter plan).scrub.memory.allocator
+                          4 .free
+                        binding := MemoryLifecycle.setBinding
+                          (subjectTerminationCheckedAfter plan).scrub.memory.binding
+                          20 none } := by
+                  simp [hallocatorEq, hreceiptExact.1, hframe]
+                have haccepted :
+                    (FrameScrub.allocate
+                      { (subjectTerminationCheckedAfter plan).scrub with
+                        memory :=
+                          { (subjectTerminationCheckedAfter plan).scrub.memory with
+                            allocator
+                            binding := MemoryLifecycle.setBinding
+                              (subjectTerminationCheckedAfter plan).scrub.memory.binding
+                              receipt.object none } }
+                      21 1 2).result = .accepted := by
+                  rw [hreleasedMemory]
+                  simp only [FrameScrub.allocate]
+                  rw [hallocation.1, hallocation.2]
+                have hfresh := FrameScrub.allocation_publishes_scrubbed
+                  { (subjectTerminationCheckedAfter plan).scrub with
+                    memory :=
+                      { (subjectTerminationCheckedAfter plan).scrub.memory with
+                        allocator
+                        binding := MemoryLifecycle.setBinding
+                          (subjectTerminationCheckedAfter plan).scrub.memory.binding
+                          receipt.object none } }
+                  21 1 2 haccepted
+                have hbindingFresh :
+                    (FrameScrub.allocate
+                      { (subjectTerminationCheckedAfter plan).scrub with
+                        memory :=
+                          { (subjectTerminationCheckedAfter plan).scrub.memory with
+                            allocator
+                            binding := MemoryLifecycle.setBinding
+                              (subjectTerminationCheckedAfter plan).scrub.memory.binding
+                              receipt.object none } }
+                      21 1 2).state.memory.binding 21 = some 4 := by
+                  rw [hreleasedMemory]
+                  simp only [FrameScrub.allocate]
+                  rw [hallocation.1, hallocation.2]
+                  simpa using hallocation.2
+                exact ⟨haccepted, hbindingFresh, hfresh⟩
+
+/-- The canonical receipt-derived release candidate exposes every validated
+outer-invariant component except the final cross-projection coherence proof.
+This packages the complete runtime proof with the constructor-owned finite
+IOMMU validation, scrub safety, synchronized memory/authority projections,
+and retired-object frame-authority removal; none of these facts is accepted
+from the caller or inferred from an unvalidated candidate. -/
+theorem subject_termination_checked_retired_memory_candidate_validated_surface
+    (plan : BootPageTablePlan.Plan) (after : AuthoritativeExtension)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate
+        (prepareAuthoritativePublication
+          (subjectTerminationCheckedAuthoritativePublicationState plan)
+          (subject_termination_checked_before_invariant plan)
+          (.cleanup (.ordinary (.terminateSubject 2)))).state
+        subjectTerminationWitnessCompletion 20 = some after) :
+    FailStop.AuthoritativeRuntimeWellFormed after.kernel ∧
+      after.iommu.Invariant ∧
+      FrameScrub.ScrubInvariant after.scrub ∧
+      after.scrub.memory = after.kernel.virtualMemory.memory ∧
+      after.iommu.core.memory = after.scrub.bytes ∧
+      after.iommu.core.capabilityAuthority = after.kernel.capabilities ∧
+      after.iommu.core.frameAuthority 20 = none := by
+  have hprojects :=
+    derive_retired_memory_authoritative_candidate_projects_release
+      _ _ _ _ hderived
+  exact ⟨
+    subject_termination_checked_retired_memory_candidate_preserves_runtime
+      plan after hderived,
+    after.iommu.invariant,
+    subject_termination_checked_retired_memory_candidate_scrub_invariant
+      plan after hderived,
+    hprojects.1,
+    hprojects.2.1,
+    hprojects.2.2.1,
+    hprojects.2.2.2⟩
 
 /-- A completion that names only the mapping scope cannot splice a partial
 cleanup into the canonical front door.  The entire prepared state, including
@@ -3795,6 +6391,324 @@ theorem assigned_edu_reuse_rejects_unbound_allocation_regression :
     assignedEDUEarlierFreeSelection = some 1 ∧
       assignedEDUEarlierFreeSelection ≠
         some assignedEDUReuseEntry.frame.frame := by
+  native_decide
+
+/-! ## Stale requester denial and fresh authorization
+
+The released-frame theorem above publishes a fresh memory lifetime.  The
+cache boundary below records the corresponding device-side distinction: the
+old assignment/mapping generations remain absent after exact invalidation,
+while a separately authorized generation can populate the fresh IOVA without
+reviving the old key.  This is still finite model evidence, not a claim about
+VT-d or QEMU execution.
+-/
+
+def assignedEDUReuseFreshKey : Key := {
+  source := assignedEDUReuseKey.source
+  assignment := ⟨assignedEDUReuseKey.assignment.slot, 2⟩
+  domain := ⟨assignedEDUReuseKey.domain.slot, 2⟩
+  mapping := ⟨assignedEDUReuseKey.mapping.slot, 2⟩
+  iova := 0x10
+  direction := .read }
+
+def assignedEDUReuseFreshEntry : Entry := {
+  key := assignedEDUReuseFreshKey
+  frame := ⟨4, 2⟩
+  permission := readOnly }
+
+private def assignedEDUReuseAcknowledged : PublicationState :=
+  (acknowledgeInvalidation
+    (prepareInvalidation assignedEDUReuseInitial
+      (.mapping assignedEDUReuseKey)).state
+    { ticket := 1, scope := .mapping assignedEDUReuseKey }).state
+
+private def assignedEDUReuseFreshCache : List Entry :=
+  insert assignedEDUReuseAcknowledged.published assignedEDUReuseFreshEntry
+
+theorem assigned_edu_reuse_stale_denied_fresh_mapping_authorized :
+    lookup assignedEDUReuseAcknowledged.published assignedEDUReuseKey = none ∧
+      lookup assignedEDUReuseFreshCache assignedEDUReuseKey = none ∧
+      lookup assignedEDUReuseFreshCache assignedEDUReuseFreshKey =
+        some assignedEDUReuseFreshEntry ∧
+      assignedEDUReuseFreshKey.assignment ≠ assignedEDUReuseKey.assignment ∧
+      assignedEDUReuseFreshKey.mapping ≠ assignedEDUReuseKey.mapping ∧
+      assignedEDUReuseFreshEntry.frame ≠ assignedEDUReuseEntry.frame := by
+  native_decide
+
+private def assignedEDUReuseFreshAssignment : Assignment := {
+  handle := assignedEDUReuseFreshKey.assignment
+  device := assignedEDUReuseFreshKey.assignment.slot
+  source := assignedEDUReuseFreshKey.source
+  domain := assignedEDUReuseFreshKey.domain
+  owner := 1 }
+
+private def assignedEDUReuseFreshFrame : Frame :=
+  { IOMMU.sampleFrames.head! with
+      handle := assignedEDUReuseFreshEntry.frame
+      owner := 1 }
+
+private def assignedEDUReuseFreshRootCapability :
+    LeanOS.Capability.Capability := {
+  object := 21
+  kind := .memory
+  rights := LeanOS.Capability.allRights
+  identity := 1
+  parent := none }
+
+private def assignedEDUReuseFreshCapabilityAuthority :
+    LeanOS.Capability.State := {
+  nextIdentity := 2
+  derivations := fun identity =>
+    if identity = 1 then
+      some (none, 21, .memory, LeanOS.Capability.allRights)
+    else none
+  subjects := fun subject => decide (subject = 1)
+  objects := fun object => decide (object = 21)
+  kinds := fun object => if object = 21 then some .memory else none
+  slotCapacity := fun subject => if subject = 1 then 1 else 0
+  slots := fun subject slot =>
+    if subject = 1 ∧ slot = 0 then
+      some assignedEDUReuseFreshRootCapability
+    else none }
+
+private theorem assignedEDUReuseFreshCapabilityAuthority_wellFormed :
+    LeanOS.Capability.WellFormed
+      assignedEDUReuseFreshCapabilityAuthority := by
+  refine ⟨?_, ?_, ?_, ?_⟩
+  · intro subject slot capability hslot
+    simp [assignedEDUReuseFreshCapabilityAuthority] at hslot
+    rcases hslot with ⟨⟨rfl, rfl⟩, rfl⟩
+    simp [assignedEDUReuseFreshCapabilityAuthority,
+      assignedEDUReuseFreshRootCapability,
+      LeanOS.Capability.rightsValid,
+      LeanOS.Capability.nonemptyRights,
+      LeanOS.Capability.allRights]
+  · intro identity parent object kind rights hderivation
+    simp [assignedEDUReuseFreshCapabilityAuthority] at hderivation
+    rcases hderivation with ⟨rfl, rfl, rfl, ⟨rfl, rfl⟩⟩
+    simp [assignedEDUReuseFreshCapabilityAuthority]
+  · intro subject slot capability otherSubject otherSlot otherCapability
+      hfirst hsecond _hidentity
+    simp [assignedEDUReuseFreshCapabilityAuthority] at hfirst hsecond
+    rcases hfirst with ⟨⟨rfl, rfl⟩, rfl⟩
+    rcases hsecond with ⟨⟨rfl, rfl⟩, rfl⟩
+    exact ⟨rfl, rfl⟩
+  · intro subject slot hbound
+    by_cases hsubject : subject = 1
+    · subst subject
+      simp [assignedEDUReuseFreshCapabilityAuthority] at hbound
+      have hslot : slot ≠ 0 := by omega
+      simp [assignedEDUReuseFreshCapabilityAuthority, hslot]
+    · simp [assignedEDUReuseFreshCapabilityAuthority, hsubject]
+
+private def assignedEDUReuseFreshCapability : Capability :=
+  { IOMMU.sampleCapabilities.head! with
+      owner := 1
+      object := 21
+      frame := assignedEDUReuseFreshEntry.frame }
+
+private def assignedEDUReuseFreshMapping : Mapping := {
+  handle := assignedEDUReuseFreshKey.mapping
+  assignment := assignedEDUReuseFreshKey.assignment
+  domain := assignedEDUReuseFreshKey.domain
+  owner := 1
+  iova := assignedEDUReuseFreshKey.iova
+  length := pageSize
+  frame := assignedEDUReuseFreshEntry.frame
+  frameOffset := 0
+  permission := assignedEDUReuseFreshEntry.permission }
+
+private def assignedEDUReuseFreshCore : Core := {
+  currentOwner := 1
+  nextAssignmentGeneration := 3
+  nextDomainGeneration := 3
+  nextMappingGeneration := 3
+  assignments := [assignedEDUReuseFreshAssignment]
+  mappings := [assignedEDUReuseFreshMapping]
+  frames := IOMMU.sampleFrames.take 4 ++ [assignedEDUReuseFreshFrame]
+  capabilityAuthority := assignedEDUReuseFreshCapabilityAuthority
+  frameAuthority := fun object =>
+    if object == 21 then some assignedEDUReuseFreshEntry.frame else none
+  capabilities := [assignedEDUReuseFreshCapability]
+  memory := IOMMU.zeroMemory }
+
+private def assignedEDUReuseFreshState : State :=
+  ⟨assignedEDUReuseFreshCore, by native_decide,
+    assignedEDUReuseFreshCapabilityAuthority_wellFormed⟩
+
+private def assignedEDUReuseOldGenerationRequest : TransferRequest := {
+  source := assignedEDUReuseKey.source
+  assignmentGeneration := assignedEDUReuseKey.assignment.generation
+  iova := assignedEDUReuseFreshKey.iova
+  length := pageSize }
+
+private def assignedEDUReuseFreshRequest : TransferRequest := {
+  source := assignedEDUReuseFreshKey.source
+  assignmentGeneration := assignedEDUReuseFreshKey.assignment.generation
+  iova := assignedEDUReuseFreshKey.iova
+  length := pageSize }
+
+private def assignedEDUReuseFreshTranslationAccepted : Bool :=
+  match translate assignedEDUReuseFreshState assignedEDUReuseFreshRequest .read with
+  | .ok _ => true
+  | .error _ => false
+
+/-- The fresh cache row above is not caller-invented cache evidence: the same
+generation-2 assignment, domain, mapping, frame lifetime, and in-range IOVA
+form a validated authoritative IOMMU state.  Translation rejects the retired
+generation-1 requester while accepting the independently authorized fresh
+request.  This remains finite model evidence, not VT-d/QEMU refinement. -/
+theorem assigned_edu_reuse_fresh_mapping_validates_and_rejects_stale_generation :
+    assignmentValid assignedEDUReuseFreshCore
+        assignedEDUReuseFreshAssignment = true ∧
+      mappingValid assignedEDUReuseFreshCore
+        assignedEDUReuseFreshMapping = true ∧
+      validateCore assignedEDUReuseFreshCore = true ∧
+      IOMMU.translationRejected assignedEDUReuseFreshState
+        assignedEDUReuseOldGenerationRequest .read = true ∧
+      assignedEDUReuseFreshTranslationAccepted = true ∧
+      assignedEDUReuseFreshAssignment.owner = 1 ∧
+      assignedEDUReuseFreshMapping.owner = 1 ∧
+      assignedEDUReuseFreshFrame.owner = 1 ∧
+      assignedEDUReuseFreshCapability.owner = 1 ∧
+      assignedEDUReuseFreshCapability.object = 21 ∧
+      assignedEDUReuseFreshCore.frameAuthority 21 =
+        some assignedEDUReuseFreshEntry.frame ∧
+      assignedEDUReuseFreshMapping.handle = assignedEDUReuseFreshKey.mapping ∧
+      assignedEDUReuseFreshMapping.frame = assignedEDUReuseFreshEntry.frame := by
+  native_decide
+
+/-- The fresh device-authority witness is tied to the actual receipt-derived
+allocation, not merely to matching numeric constants.  Any canonical cleanup
+candidate accepted by the authoritative constructor must first allocate and
+scrub object 21 for subject 1 on the reclaimed physical frame.  That binding
+is exactly the object/frame pair named by the validated capability, assignment,
+mapping, frame registry, and frame-authority projections used by the fresh
+canary below.  This is a cross-projection finite-model correspondence; it does
+not claim a refinement from `FrameScrub.allocate` to VT-d or QEMU execution. -/
+theorem assigned_edu_reuse_receipt_allocation_corresponds_to_fresh_authority
+    (plan : BootPageTablePlan.Plan) (after : AuthoritativeExtension)
+    (hderived :
+      deriveRetiredMemoryAuthoritativeCandidate
+        (prepareAuthoritativePublication
+          (subjectTerminationCheckedAuthoritativePublicationState plan)
+          (subject_termination_checked_before_invariant plan)
+          (.cleanup (.ordinary (.terminateSubject 2)))).state
+        subjectTerminationWitnessCompletion 20 = some after) :
+    let allocated := FrameScrub.allocate after.scrub 21 1 2
+    allocated.result = .accepted ∧
+      allocated.state.memory.binding assignedEDUReuseFreshCapability.object =
+        some assignedEDUReuseFreshCapability.frame.frame ∧
+      FrameScrub.Fresh allocated.state assignedEDUReuseFreshCapability.object ∧
+      assignedEDUReuseFreshCapabilityAuthority.objects
+          assignedEDUReuseFreshCapability.object = true ∧
+      assignedEDUReuseFreshCapabilityAuthority.subjects
+          assignedEDUReuseFreshAssignment.owner = true ∧
+      (∃ root,
+        assignedEDUReuseFreshCapabilityAuthority.slots
+            assignedEDUReuseFreshAssignment.owner 0 = some root ∧
+          root.object = assignedEDUReuseFreshCapability.object ∧
+          root.kind = .memory) ∧
+      assignedEDUReuseFreshCore.frameAuthority
+          assignedEDUReuseFreshCapability.object =
+        some assignedEDUReuseFreshCapability.frame ∧
+      assignedEDUReuseFreshMapping.assignment =
+        assignedEDUReuseFreshAssignment.handle ∧
+      assignedEDUReuseFreshMapping.owner = assignedEDUReuseFreshAssignment.owner ∧
+      assignedEDUReuseFreshMapping.frame = assignedEDUReuseFreshCapability.frame ∧
+      assignedEDUReuseFreshFrame.handle = assignedEDUReuseFreshMapping.frame ∧
+      assignedEDUReuseFreshFrame.owner = assignedEDUReuseFreshMapping.owner := by
+  have hallocated :=
+    subject_termination_checked_retired_memory_candidate_allocates_fresh
+      plan after hderived
+  refine ⟨hallocated.1, ?_, ?_, ?_⟩
+  · have hobject : assignedEDUReuseFreshCapability.object = 21 := by
+      native_decide
+    have hframe : assignedEDUReuseFreshCapability.frame.frame = 4 := by
+      native_decide
+    rw [hobject, hframe]
+    exact hallocated.2.1
+  · simpa [assignedEDUReuseFreshCapability] using hallocated.2.2
+  · native_decide
+
+/-- The fixed machine-facing reuse calls and the fresh-lifetime model form one
+reviewed sequence: exact preparation and completion validate, the ordered
+release/scrub/publication row succeeds, the retired generation remains denied,
+and the independently validated generation-2 request translates.  The scalar
+exports validate the call shapes and ordering only; this theorem does not claim
+that they implement VT-d completion or refine the QEMU device. -/
+theorem assigned_edu_reuse_machine_exports_bind_stale_denial_and_fresh_authority :
+    assignedEDUReusePublicationExport
+        1 1 16 0 0 1 0 1 0 1 0 0 1 0 = 0 ∧
+      assignedEDUReusePublicationExport
+        2 1 16 0 0 1 0 1 0 1 0 0 1 0 = 0 ∧
+      assignedEDUReuseProtocolExport 1 1 1 0 = 0 ∧
+      assignedEDUReuseFreshPublicationExport 0 0 = 0 ∧
+      IOMMU.translationRejected assignedEDUReuseFreshState
+        assignedEDUReuseOldGenerationRequest .read = true ∧
+      assignedEDUReuseFreshTranslationAccepted = true := by
+  native_decide
+
+private def assignedEDUReuseFreshCanaryMemory : FrameId → Nat → UInt8 :=
+  fun frame offset =>
+    if frame = assignedEDUReuseFreshEntry.frame.frame && offset < pageSize then
+      0xa5
+    else
+      IOMMU.zeroMemory frame offset
+
+private def assignedEDUReuseFreshCanaryCore : Core :=
+  { assignedEDUReuseFreshCore with memory := assignedEDUReuseFreshCanaryMemory }
+
+private def assignedEDUReuseFreshCanaryState : State :=
+  ⟨assignedEDUReuseFreshCanaryCore, by native_decide,
+    assignedEDUReuseFreshCapabilityAuthority_wellFormed⟩
+
+private def observedReadBytes {state request} :
+    ReadOutcome state request → Option (List UInt8)
+  | .observed _ bytes => some bytes
+  | .rejected _ => none
+
+/-- The machine-facing invalidation and publication sequence is compatible
+with a concrete fresh-owner canary observation rather than a permanently
+disabled device.  The retired generation-1 request is rejected before it can
+observe bytes, while the independently authorized generation-2 request reads
+the complete fresh canary from the reused physical frame.  The scalar exports
+still validate call shape and order only; this finite witness does not claim
+VT-d completion, QEMU execution, or compiler refinement. -/
+theorem assigned_edu_reuse_machine_sequence_preserves_fresh_canary :
+    assignedEDUReusePublicationExport
+        1 1 16 0 0 1 0 1 0 1 0 0 1 0 = 0 ∧
+      assignedEDUReusePublicationExport
+        2 1 16 0 0 1 0 1 0 1 0 0 1 0 = 0 ∧
+      assignedEDUReuseProtocolExport 1 1 1 0 = 0 ∧
+      assignedEDUReuseFreshPublicationExport 0 0 = 0 ∧
+      (deviceRead assignedEDUReuseFreshCanaryState
+        assignedEDUReuseOldGenerationRequest).reason = some .staleAssignment ∧
+      observedReadBytes
+          (deviceRead assignedEDUReuseFreshCanaryState
+            assignedEDUReuseFreshRequest) =
+        some (List.replicate pageSize 0xa5) := by
+  native_decide
+
+private def assignedEDUReuseAfterWrite {request} :
+    WriteOutcome assignedEDUReuseFreshCanaryState request → State
+  | .written after _ => after
+  | .rejected _ => assignedEDUReuseFreshCanaryState
+
+/-- A retired requester cannot corrupt the fresh owner's reused-frame canary.
+The stale generation-1 write is rejected before memory mutation, and a read
+from the resulting state through the independently authorized generation-2
+mapping still observes every fresh canary byte.  This is finite model evidence;
+it does not claim VT-d, QEMU, or compiler refinement. -/
+theorem assigned_edu_reuse_stale_write_preserves_fresh_canary :
+    let overwrite := deviceWrite assignedEDUReuseFreshCanaryState
+      assignedEDUReuseOldGenerationRequest
+      (List.replicate pageSize 0x3c)
+    overwrite.reason = some .staleAssignment ∧
+      observedReadBytes
+          (deviceRead (assignedEDUReuseAfterWrite overwrite)
+            assignedEDUReuseFreshRequest) =
+        some (List.replicate pageSize 0xa5) := by
   native_decide
 
 /-! ## Fixed-width hosted invalidation sequence

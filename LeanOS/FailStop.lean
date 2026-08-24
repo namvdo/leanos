@@ -9324,6 +9324,29 @@ theorem terminateSubject_accepted_cleans_runtime_references state subject lifecy
       simp [installTerminatedSubject, BlockingIPCContext.setRetained],
     CapabilityTransfer.cancelAllOffers_pending _⟩
 
+/-- Accepted subject termination removes every address-space ownership entry
+for that subject in the same published lifecycle that retires its identity.
+This exposes the lifecycle fact needed by outer authority publishers without
+requiring them to unfold the private cleanup installer. -/
+theorem terminateSubject_accepted_removes_owned_address_spaces
+    state subject lifecycle
+    (hstate : RuntimeWellFormed state)
+    (hmode : state.execution.mode = .running)
+    (haccepted : SubjectLifecycle.terminate state.lifecycle subject =
+      { state := lifecycle, result := .accepted })
+    addressSpace
+    (howner : state.lifecycle.addressOwner addressSpace = some subject) :
+    (gate state (.terminateSubject subject)).state.lifecycle.addressOwner
+        addressSpace = none := by
+  simp only [gate, hmode, operationReply, applyOperation, haccepted]
+  simp only [installTerminatedSubject, installTerminatedResumable,
+    installResumable, installLifecycle]
+  rcases hstate.1 with
+    ⟨_, hschedulerLifecycle, _, _, _, _, _, hresumableScheduler,
+      _, _, _, _, _⟩
+  apply ResumablePreemption.cleanup_removes_owned_address_space
+  simpa [hresumableScheduler, hschedulerLifecycle] using howner
+
 /-- Terminating an endpoint owner cannot strand a peer waiter on the retired
 endpoint.  The peer's exact saved context moves from the waiter/context pair to
 the quiescent deferred-cancellation bank, and the dead endpoint's modeled
@@ -16409,6 +16432,56 @@ private theorem installCopiedCapabilities_dormantCancellationCompatible
               (And.intro hvalid.2.2.2.2.2.1
                 (And.intro hvalid.2.2.2.2.2.2 hcontext)))))
 
+/-- Public capability-publication boundary for a successor whose provenance
+and authority obligations have already been checked.  The underlying record
+installer remains private so callers cannot unfold a raw publication in place
+of discharging this boundary's complete runtime contract. -/
+def authoritativePublishCheckedCapabilities (state : CompositeState)
+    (capabilities : Capability.State) : CompositeState :=
+  installCopiedCapabilities state capabilities
+
+/-- A checked capability successor crosses the folded authoritative boundary
+only when it preserves every registry consumed by the runtime, every live slot
+comes from the pre-state, and both mapping and blocking-receive authority stay
+available.  Deferred-cancellation and invalidation-publication state remain
+the exact pre-state projections. -/
+theorem authoritativePublishCheckedCapabilities_preserves_authoritativeRuntimeWellFormed
+    state next
+    (hstate : AuthoritativeRuntimeWellFormed state)
+    (hwellFormed : Capability.WellFormed next)
+    (hsubjects : next.subjects = state.capabilities.subjects)
+    (hobjects : next.objects = state.capabilities.objects)
+    (hkinds : next.kinds = state.capabilities.kinds)
+    (hnextIdentity : next.nextIdentity = state.capabilities.nextIdentity)
+    (hderivations : next.derivations = state.capabilities.derivations)
+    (hslots : ∀ subject slot capability,
+      next.slots subject slot = some capability →
+        state.capabilities.slots subject slot = some capability)
+    (hruntimeAuthority : RuntimeAuthorityPreserved state.capabilities next)
+    (hreceiveAuthority : ∀ subject endpoint,
+      Capability.HasAuthority state.capabilities subject endpoint .receive →
+        Capability.HasAuthority next subject endpoint .receive) :
+    AuthoritativeRuntimeWellFormed
+      (authoritativePublishCheckedCapabilities state next) := by
+  have hglobal : RuntimeWellFormed (installCopiedCapabilities state next) :=
+    installRevokedCapabilities_preserves_runtimeWellFormed state next hstate.1
+      hwellFormed hsubjects hobjects hkinds hnextIdentity hderivations hslots
+      hruntimeAuthority
+  have hblocking : BlockingRuntimeWellFormed
+      (installCopiedCapabilities state next) :=
+    installReceiveAuthorityPreservingCapabilities_preserves_blockingRuntimeWellFormed
+      state next hstate.blocking hglobal hwellFormed hsubjects hobjects hkinds
+      hreceiveAuthority
+  have hdeferred : DeferredBlockingRuntimeWellFormed
+      (installCopiedCapabilities state next) :=
+    dormantCancellationCompatible_preserves state
+      (installCopiedCapabilities state next) hstate.deferred hblocking
+      (installCopiedCapabilities_dormantCancellationCompatible
+        state next hstate hsubjects)
+  refine ⟨hdeferred.1, hdeferred.2, ?_⟩
+  simpa [authoritativePublishCheckedCapabilities,
+    installCopiedCapabilities] using hstate.publication
+
 /-- Publishing a sealed-transfer state has the same dormant-cancellation
 boundary as direct capability publication.  Transfer offer/receipt may change
 the endpoint mailbox and capability derivation state, but a stable subject
@@ -20553,6 +20626,26 @@ def compositeDispatcherInitial (plan : BootPageTablePlan.Plan) : CompositeState 
     blockingContexts := fun _ => none
     deferredCancels := BlockingIPCContext.emptyDeferred }
 
+/-- Subject 2's canonical memory-read authority has one executable slot.
+This small public projection lets outer lifecycle proofs reason about removal
+without exposing the dispatcher's private capability fixture. -/
+theorem compositeDispatcherInitial_subjectTwo_memory_read_slot
+    (plan : BootPageTablePlan.Plan) (slot : Nat)
+    (capability : Capability.Capability)
+    (hslot : (compositeDispatcherInitial plan).capabilities.slots 2 slot =
+      some capability)
+    (hobject : capability.object = 20)
+    (hread : Capability.hasRight capability.rights .read) :
+    slot = 2 := by
+  simp only [compositeDispatcherInitial, dispatcherCapabilities,
+    dispatcherSubjectOneSpace, dispatcherSubjectOneEndpoint,
+    dispatcherSubjectTwoEndpoint, dispatcherSubjectTwoSpace,
+    dispatcherSubjectTwoMemory] at hslot
+  repeat' split at hslot
+  all_goals cases hslot <;>
+    simp_all [Capability.hasRight, Capability.permits,
+      Capability.allRights]
+
 private theorem dispatcherAddressOwner_some_iff (addressSpace subject : Nat) :
     dispatcherLifecycle.addressOwner addressSpace = some subject ↔
       (addressSpace = 1 ∧ subject = 1) ∨
@@ -20718,5 +20811,64 @@ theorem compositeDispatcherTerminateSubjectTwo_binding_owned
     FrameAllocator.IsOwnedBy] at hbinding ⊢
   rcases hbinding with ⟨rfl, rfl⟩
   rfl
+
+/-- Canonical subject termination retires subject authority but does not
+silently release its bound memory object.  Frame 4 remains owned by object 20,
+so allocating a fresh object is rejected until a later explicit memory-release
+transition crosses its own checked publication boundary. -/
+theorem compositeDispatcherTerminateSubjectTwo_requires_explicit_memory_release
+    (plan : BootPageTablePlan.Plan) :
+    let memory :=
+      (authoritativeGate (compositeDispatcherInitial plan)
+        (.ordinary (.terminateSubject 2))).state.virtualMemory.memory
+    memory.binding 20 = some 4 ∧
+      (MemoryLifecycle.allocate memory 21 1 2).result = .rejected .exhausted := by
+  simp [authoritativeGate_ordinary_state, gate, applyOperation,
+    compositeDispatcherInitial, dispatcherLifecycle, dispatcherCapabilities,
+    dispatcherVirtualMemory, dispatcherMemory, dispatcherScheduler,
+    dispatcherEndpoints, SubjectLifecycle.terminate, installTerminatedSubject,
+    installTerminatedResumable, ResumablePreemption.cleanupSubject,
+    MemoryLifecycle.allocate]
+  native_decide
+
+/-- Once the canonical subject-2 memory binding has crossed its separate
+release boundary, the reclaimed frame admits a real fresh lifetime for
+subject 1 in its first unused capability slot.  This projection keeps the
+concrete dispatcher fixture private while exposing the exact allocation fact
+needed by the outer IOMMU/frame-reuse proof. -/
+theorem compositeDispatcherTerminateSubjectTwo_released_memory_allocates_fresh
+    (plan : BootPageTablePlan.Plan) :
+    let memory :=
+      (authoritativeGate (compositeDispatcherInitial plan)
+        (.ordinary (.terminateSubject 2))).state.virtualMemory.memory
+    let released : MemoryLifecycle.State :=
+      { memory with
+        allocator := FrameAllocator.setStatus memory.allocator 4 .free
+        binding := MemoryLifecycle.setBinding memory.binding 20 none }
+    (MemoryLifecycle.allocate released 21 1 2).result = .accepted ∧
+      (MemoryLifecycle.allocate released 21 1 2).state.binding 21 = some 4 := by
+  simp [authoritativeGate_ordinary_state, gate, applyOperation,
+    compositeDispatcherInitial, dispatcherLifecycle, dispatcherCapabilities,
+    dispatcherVirtualMemory, dispatcherMemory, dispatcherScheduler,
+    dispatcherEndpoints, SubjectLifecycle.terminate, installTerminatedSubject,
+    installTerminatedResumable, ResumablePreemption.cleanupSubject,
+    MemoryLifecycle.allocate, FrameAllocator.allocate]
+  native_decide
+
+/-- Canonical subject termination retires the owned memory-object capability
+before the still-bound frame can cross the later receipt-consuming release
+boundary.  This exposes the exact capability predicate used by that boundary
+without requiring outer proofs to unfold the private dispatcher fixture. -/
+theorem compositeDispatcherTerminateSubjectTwo_retires_memory_object
+    (plan : BootPageTablePlan.Plan) :
+    (authoritativeGate (compositeDispatcherInitial plan)
+      (.ordinary (.terminateSubject 2))).state.virtualMemory.memory.capabilities.objects
+        20 = false := by
+  simp [authoritativeGate_ordinary_state, gate, applyOperation,
+    compositeDispatcherInitial, dispatcherLifecycle, dispatcherCapabilities,
+    dispatcherVirtualMemory, dispatcherMemory, dispatcherScheduler,
+    dispatcherEndpoints, SubjectLifecycle.terminate, installTerminatedSubject,
+    installTerminatedResumable, ResumablePreemption.cleanupSubject]
+  native_decide
 
 end LeanOS.FailStop
