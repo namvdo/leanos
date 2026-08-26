@@ -67,6 +67,7 @@ def prepare_tree(tmp: Path) -> tuple[Path, Path, Path, argparse.Namespace]:
         tool_versions=tools,
         version="0.1.0",
         scenario=None,
+        tier="all",
         shard_index=None,
         shard_count=None,
         jobs=4,
@@ -102,7 +103,7 @@ def run_fixtures() -> None:
 
         _, matrix_rows = evidence.parse_matrix(evidence.DEFAULT_MATRIX)
         shards = [
-            evidence.select_rows(matrix_rows, None, index, 4)
+            evidence.select_rows(matrix_rows, None, "all", index, 4)
             for index in range(4)
         ]
         if [row["id"] for shard in shards for row in shard] == [
@@ -114,17 +115,210 @@ def run_fixtures() -> None:
         ):
             raise AssertionError("stable shards do not cover the matrix exactly once")
         expect_failure(
-            lambda: evidence.select_rows(matrix_rows, "blocking-ipc", 0, 4),
+            lambda: evidence.select_rows(matrix_rows, "blocking-ipc", "all", 0, 4),
             "cannot be combined with sharding",
         )
         expect_failure(
-            lambda: evidence.select_rows(matrix_rows, None, 0, None),
+            lambda: evidence.select_rows(matrix_rows, None, "all", 0, None),
             "must be specified together",
         )
         expect_failure(
-            lambda: evidence.select_rows(matrix_rows, None, 4, 4),
+            lambda: evidence.select_rows(matrix_rows, None, "all", 4, 4),
             "between zero and count minus one",
         )
+
+        pr_rows = evidence.select_rows(matrix_rows, None, "pr", None, None)
+        if len(pr_rows) != len(evidence.RUNNERS):
+            raise AssertionError("PR tier does not select exactly one row per runner")
+        pr_build_artifacts = evidence.select_build_artifacts(pr_rows, "0.1.0")
+        if [artifact[0] for artifact in pr_build_artifacts] != [
+            row["id"] for row in pr_rows
+        ]:
+            raise AssertionError("PR build plan does not preserve matrix order")
+        if any("@VERSION@" in artifact[2] for artifact in pr_build_artifacts):
+            raise AssertionError("PR build plan retains an unexpanded image version")
+        if len({artifact[1] for artifact in pr_build_artifacts}) != len(
+            evidence.RUNNERS
+        ):
+            raise AssertionError("PR build plan does not retain one runner boundary")
+        expect_failure(
+            lambda: evidence.select_build_artifacts(pr_rows, "not-a-version"),
+            "version must be MAJOR.MINOR.PATCH",
+        )
+        if pr_build_artifacts[0][3:] != ("leanos-prelink.elf", "leanos.elf"):
+            raise AssertionError("PR build plan does not map the canonical Make targets")
+        artifact_targets = {
+            artifact[0]: artifact[3:] for artifact in pr_build_artifacts
+        }
+        expected_special_targets = {
+            "assigned-edu-inventory": ("leanos-prelink.elf", "leanos.elf"),
+            "double-fault": (
+                "leanos-double-fault-prelink.elf",
+                "kernel-double-fault.o",
+            ),
+            "entry-stack-overflow": (
+                "leanos-entry-stack-overflow-prelink.elf",
+                "kernel-entry-stack-overflow.o",
+            ),
+            "double-fault-guard-mapped": (
+                "leanos-guard-prelink.elf",
+                "kernel-double-fault-guard-mapped.o",
+            ),
+        }
+        for scenario, expected_targets in expected_special_targets.items():
+            if artifact_targets.get(scenario) != expected_targets:
+                raise AssertionError(
+                    f"PR build plan maps {scenario} to nonexistent Make targets"
+                )
+        build_image = (evidence.ROOT / "scripts/build-image.sh").read_text(
+            encoding="utf-8"
+        )
+        if 'selected_prelink_targets+=("$build/$plan_prelink")' not in build_image:
+            raise AssertionError("build-image does not consume selected prelink targets")
+        if 'selected_final_targets+=("$build/$plan_final")' not in build_image:
+            raise AssertionError("build-image does not consume selected final targets")
+        if 'selected_prelink_lookup["$build/$plan_prelink"]=1' not in build_image:
+            raise AssertionError("build-image does not index selected prelink targets")
+        if 'selected_final_lookup["$build/$plan_final"]=1' not in build_image:
+            raise AssertionError("build-image does not index selected final targets")
+        if 'for prelink in "${selected_prelink_targets[@]}"' not in build_image:
+            raise AssertionError("build-image does not validate selected prelink cache coverage")
+        if 'if [[ ! -f "$prelink" ]]; then' not in build_image:
+            raise AssertionError("build-image accepts a cache missing selected prelinks")
+        if 'boot_plan_batch_args=("${filtered_boot_plan_batch_args[@]}")' not in build_image:
+            raise AssertionError("build-image does not restrict PR boot-plan generation")
+        if 'if [[ "$evidence_tier" == all ]]; then\n  cmp "$build/boot-page-plan-fault-containment.h"' not in build_image:
+            raise AssertionError("build-image does not reserve cross-variant plan checks for full evidence")
+        if 'if [[ "$evidence_tier" == all ]] && nm "$build/kernel.o"' not in build_image:
+            raise AssertionError("build-image checks unselected canonical objects in PR shards")
+        if '-z "${selected_final_lookup[$elf_path]:-}"' not in build_image:
+            raise AssertionError("build-image does not restrict PR policy checks to selected final images")
+        if 'elif ((direct_port_images == 0)); then' not in build_image:
+            raise AssertionError("build-image accepts an empty selected PR policy set")
+        if 'selected_final_enabled "$return_elf" || continue' not in build_image:
+            raise AssertionError("build-image does not restrict PR return policy checks")
+        if 'selected_final_enabled "$elf_path" || return 0' not in build_image:
+            raise AssertionError("build-image does not restrict final-plan checks to selected images")
+        if 'validate_selected_final_plan "$build/leanos.elf"' not in build_image:
+            raise AssertionError("build-image does not route the canonical final plan through selection")
+        if 'validate_selected_final_plan "$build/leanos-bootstrap64-nmi.elf"' not in build_image:
+            raise AssertionError("build-image does not route special final plans through selection")
+        if 'if selected_final_enabled "$build/leanos-frame-budget.elf"; then' not in build_image:
+            raise AssertionError("build-image does not restrict frame-budget convergence")
+        if 'selected_final_enabled "$build/leanos-fault-${probe}.elf" || continue' not in build_image:
+            raise AssertionError("build-image does not restrict fault-family final plans")
+        if (
+            'expected_fault_plan="$build/boot-page-plan-fault-${probe}.h"\n'
+            '  if [[ "$evidence_tier" == all && "$probe" != stale-translation ]]'
+            not in build_image
+        ):
+            raise AssertionError(
+                "build-image compares selected PR fault plans against an unselected stub"
+            )
+        for final_elf in (
+            "leanos-double-fault.elf",
+            "leanos-entry-stack-overflow.elf",
+            "leanos-double-fault-guard-mapped.elf",
+        ):
+            if f'if selected_final_enabled "$build/{final_elf}"; then' not in build_image:
+                raise AssertionError(
+                    f"build-image does not restrict {final_elf} final relink"
+                )
+        if 'selected_final_enabled "$build/leanos-${probe}.elf" || continue' not in build_image:
+            raise AssertionError("build-image does not restrict integer-fault final plans")
+        if 'selected_final_enabled "$elf" || return 0' not in build_image:
+            raise AssertionError("build-image does not restrict image-policy jobs")
+        if 'selected_final_lookup["$build/leanos-double-fault.elf"]=1' not in build_image:
+            raise AssertionError("build-image does not index manually linked selected ELFs")
+        if 'selected_iso_root_lookup["$staging_root"]="$elf"' not in build_image:
+            raise AssertionError("build-image does not index selected ISO staging roots")
+        if 'local elf="${selected_iso_root_lookup[$staging_root]:-}"' not in build_image:
+            raise AssertionError("build-image does not filter ISO packaging by selected root")
+        if 'xargs -0 sha256sum > "$build/SHA256SUMS"' not in build_image:
+            raise AssertionError("build-image does not checksum only selected PR artifacts")
+        if 'if selected_final_enabled "$build/leanos.elf"; then' not in build_image:
+            raise AssertionError("build-image does not gate canonical-only validation")
+        if 'write_selected_disassembly "$build/leanos-bootstrap32-ud.elf"' not in build_image:
+            raise AssertionError("build-image does not gate selected disassembly reports")
+        if 'run_selected_extended_state_policy x87' not in build_image:
+            raise AssertionError("build-image does not gate extended-state policy reports")
+        if 'if [[ "$evidence_tier" == all ]]; then\n  queue_return_fixture restore' not in build_image:
+            raise AssertionError("build-image does not reserve negative policy fixtures for full evidence")
+        if 'if [[ "$evidence_tier" == all ]]' not in build_image:
+            raise AssertionError("build-image does not preserve the all-tier graph")
+        malformed_elf_rows = [dict(pr_rows[0], elf="outside.elf")]
+        expect_failure(
+            lambda: evidence.select_build_artifacts(malformed_elf_rows, "0.1.0"),
+            "unsupported build ELF",
+        )
+
+        duplicate_pr_runner = tmp / "duplicate-pr-runner.tsv"
+        mutate_matrix(
+            duplicate_pr_runner,
+            lambda lines: [
+                line.rsplit("\t", 1)[0] + "\tpr"
+                if line.startswith("projection-authority-mutation\t")
+                else line
+                for line in lines
+            ],
+        )
+        expect_failure(
+            lambda: evidence.parse_matrix(duplicate_pr_runner),
+            "PR tier must contain exactly one scenario per runner",
+        )
+
+        ci_workflow = evidence.ROOT / ".github/workflows/ci.yml"
+        original_ci = ci_workflow.read_text(encoding="utf-8")
+        try:
+            ci_workflow.write_text(
+                original_ci.replace(
+                    "  merge_group:\n    branches:\n      - main\n", "", 1
+                ),
+                encoding="utf-8",
+            )
+            expect_failure(
+                evidence.check_workflows,
+                "CI must run complete evidence for merge-queue candidates targeting main",
+            )
+        finally:
+            ci_workflow.write_text(original_ci, encoding="utf-8")
+
+        try:
+            ci_workflow.write_text(
+                original_ci.replace(
+                    "LEANOS_SKIP_HOSTED_BOUNDARY_REPLAY: "
+                    "${{ github.event_name == 'pull_request' && '1' || '0' }}",
+                    "LEANOS_SKIP_HOSTED_BOUNDARY_REPLAY: 0",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            expect_failure(
+                evidence.check_workflows,
+                "CI must parallelize complete hosted evidence only for pull requests",
+            )
+        finally:
+            ci_workflow.write_text(original_ci, encoding="utf-8")
+
+        try:
+            ci_workflow.write_text(
+                original_ci.replace(
+                    "  clang-reproducibility-build:\n"
+                    "    name: Clang independent reproducibility build\n"
+                    "    if: github.event_name != 'pull_request'",
+                    "  clang-reproducibility-build:\n"
+                    "    name: Clang independent reproducibility build\n"
+                    "    if: github.event_name == 'pull_request'",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            expect_failure(
+                evidence.check_workflows,
+                "CI must reserve the independent Clang reproducibility build",
+            )
+        finally:
+            ci_workflow.write_text(original_ci, encoding="utf-8")
 
         duplicate = tmp / "duplicate.tsv"
         mutate_matrix(

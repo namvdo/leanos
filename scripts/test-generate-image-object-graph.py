@@ -130,7 +130,7 @@ generate_lean_c {source!s} {output!s}
         )
         self.assertEqual(
             wrapper.count('"${kernel_source_make_args[@]}"'),
-            3,
+            5,
         )
         self.assertIn(
             '"$current_kernel_source_signature" > "$kernel_source_signature"',
@@ -146,7 +146,7 @@ generate_lean_c {source!s} {output!s}
         prelink_targets = (
             "prelink-images policy-fixture-images return-corruption-prelinks"
         )
-        self.assertIn(object_targets + "\n  make -f", wrapper)
+        self.assertIn(object_targets + "\n    make -f", wrapper)
         self.assertIn(prelink_targets, wrapper)
         self.assertNotIn(object_targets + " \\\n    " + prelink_targets, wrapper)
 
@@ -1038,6 +1038,16 @@ compute_lean_c_signature {root!s}
             graph,
         )
         self.assertIn("boot-page-plan-fault-stale-translation.h", graph)
+        for variant, plan in (
+            ("kernel-fault-reserved-bit", "boot-page-plan-fault-reserved-bit.h"),
+            ("kernel-fault-walk-mismatch", "boot-page-plan-fault-walk-mismatch.h"),
+        ):
+            command = next(
+                graph_lines[index + 1]
+                for index, line in enumerate(graph_lines)
+                if line.startswith(f"out/{variant}.o out/{variant}.o.d &:")
+            )
+            self.assertIn(f'BOOT_PAGE_PLAN_HEADER="{plan}"', command)
         self.assertIn(
             "out/kernel-entry-stack-overflow.o "
             "out/kernel-entry-stack-overflow.o.d &:",

@@ -2,6 +2,11 @@ name: CI
 
 on:
   pull_request:
+  # Merge-queue candidates run the complete evidence tier before main advances.
+  # The tier selectors below intentionally special-case only pull_request.
+  merge_group:
+    branches:
+      - main
   push:
     branches:
       - main
@@ -64,6 +69,10 @@ jobs:
             binutils=2.42-4ubuntu2.10
 
       - name: Build and check proofs
+        env:
+          # Pull requests run the same hosted evidence in the parallel job below.
+          # Full merge-group/main evidence remains in scripts/check.sh.
+          LEANOS_SKIP_HOSTED_BOUNDARY_REPLAY: ${{ github.event_name == 'pull_request' && '1' || '0' }}
         run: ./scripts/check.sh
 
       - name: Verify frame-budget negative evidence
@@ -89,7 +98,7 @@ jobs:
           retention-days: 14
 
       - name: Preserve generated-oracle evidence
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: leanos-oracle-${{ github.sha }}
@@ -107,7 +116,7 @@ jobs:
           retention-days: 14
 
       - name: Preserve hosted sanitizer evidence
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: hosted-sanitizers-${{ github.sha }}
@@ -119,6 +128,70 @@ jobs:
             build/hosted-sanitizer-negatives/
             scripts/hosted-generated-boundaries.tsv
           if-no-files-found: warn
+          retention-days: 14
+
+  hosted-boundary:
+    name: Hosted generated-boundary evidence
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Install pinned Lean toolchain
+        uses: ./.github/actions/setup-lean
+
+      - name: Install pinned hosted-boundary compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-13=13.3.0-6ubuntu2~24.04.1 \
+            libasan8=14.2.0-4ubuntu2~24.04.1 \
+            libubsan1=14.2.0-4ubuntu2~24.04.1 \
+            binutils=2.42-4ubuntu2.10
+
+      - name: Replay hosted generated boundaries
+        run: |
+          lake build
+          lake build leanos-boot-plan
+          lake build leanos-vtd-plan
+          ./scripts/test-hosted-boundary-harness-scan.sh
+          ./scripts/check-hosted-generated-boundaries.sh ordinary
+          ./scripts/check-hosted-generated-boundaries.sh sanitized
+          ./scripts/check-hosted-sanitizer-negatives.sh
+
+      - name: Preserve generated-oracle evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: leanos-oracle-${{ github.sha }}
+          path: |
+            build/hosted-generated-sources/oracle/FrameBudgetScenario.c
+            build/hosted-generated-sources/oracle/CompositeDispatcher.c
+            include/leanos/composite-dispatcher.h
+            build/oracle/corpus.tsv
+            build/oracle/host-results.txt
+            build/oracle/host-*.txt
+            build/oracle/negative-fixtures.tsv
+            build/oracle/toolchain-and-flags.tsv
+            build/oracle/manifest.tsv
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Preserve hosted sanitizer evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: hosted-sanitizers-${{ github.sha }}
+          path: |
+            build/oracle-sanitized/
+            build/boot-handoff-host-sanitized/
+            build/boot-handoff-stream-sanitized/
+            build/hosted-sanitizer-evidence/
+            build/hosted-sanitizer-negatives/
+            scripts/hosted-generated-boundaries.tsv
+          if-no-files-found: error
           retention-days: 14
 
   clang-image:
@@ -169,9 +242,14 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p build/ci
-          ./scripts/build-image.sh \
+          LEANOS_EVIDENCE_TIER="${{ github.event_name == 'pull_request' && 'pr' || 'all' }}" \
+            LEANOS_EVIDENCE_SHARD_INDEX="${{ github.event_name == 'pull_request' && '0' || '' }}" \
+            LEANOS_EVIDENCE_SHARD_COUNT="${{ github.event_name == 'pull_request' && '4' || '' }}" \
+            ./scripts/build-image.sh \
             2>&1 | tee build/ci/clang-image-build.log
-          ./scripts/write-reproducibility-manifest.sh
+          if [[ "${{ github.event_name }}" != pull_request ]]; then
+            ./scripts/write-reproducibility-manifest.sh
+          fi
           python3 scripts/run-emulator-evidence.py run \
             --scenario blocking-ipc \
             --tool-versions build/ci/clang-tool-versions.txt \
@@ -218,6 +296,7 @@ jobs:
           retention-days: 14
 
       - name: Preserve primary reproducibility manifest
+        if: github.event_name != 'pull_request'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: leanos-clang-repro-primary-${{ github.sha }}
@@ -227,6 +306,7 @@ jobs:
 
   clang-reproducibility-build:
     name: Clang independent reproducibility build
+    if: github.event_name != 'pull_request'
     needs: repository-hygiene
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -339,18 +419,28 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p build/ci
-          ./scripts/build-image.sh 2>&1 | tee build/ci/image-build.log
-          ./scripts/test-nmi-image-policy.sh
-          ./scripts/test-early-idt-policy.sh
-          ./scripts/test-early-probe-policy.sh
-          ./scripts/run-dma-unknown-device.sh
+          LEANOS_EVIDENCE_TIER="${{ github.event_name == 'pull_request' && 'pr' || 'all' }}" \
+            LEANOS_EVIDENCE_SHARD_INDEX="${{ matrix.shard }}" \
+            LEANOS_EVIDENCE_SHARD_COUNT=4 \
+            ./scripts/build-image.sh 2>&1 | tee build/ci/image-build.log
+          [[ ! -f build/boot/leanos-nmi.elf ]] || \
+            ./scripts/test-nmi-image-policy.sh
+          [[ ! -f build/boot/leanos.elf ]] || \
+            ./scripts/test-early-idt-policy.sh
+          [[ ! -f build/boot/kernel.o ]] || \
+            ./scripts/test-early-probe-policy.sh
+          [[ ! -f build/boot/leanos-${LEANOS_VERSION:-0.1.0}-x86_64.iso ]] || \
+            ./scripts/run-dma-unknown-device.sh
           ./scripts/run-emulator-evidence.py run \
+            --tier "${{ github.event_name == 'pull_request' && 'pr' || 'all' }}" \
             --shard-index ${{ matrix.shard }} \
             --shard-count 4 \
             --output build/evidence/emulator-shard-${{ matrix.shard }}.json \
             2>&1 | tee build/ci/emulator-evidence.log
-          ./scripts/run-assigned-edu-negatives.sh \
-            2>&1 | tee build/ci/assigned-edu-negatives.log
+          if [[ -f build/boot/leanos-${LEANOS_VERSION:-0.1.0}-x86_64-assigned-edu-missing-mmio-mapping.iso ]]; then
+            ./scripts/run-assigned-edu-negatives.sh \
+              2>&1 | tee build/ci/assigned-edu-negatives.log
+          fi
 
       - name: Preserve reproducibility artifacts
         if: always()

@@ -162,6 +162,7 @@ REQUIRED_FAULT_RELEASE_ARTIFACTS += tuple(
     )
 )
 RESULT_CLASSES = {"accepted-boot", "controlled-rejection", "fail-stop"}
+TIERS = {"pr", "evidence"}
 RUNNERS = {
     "boot",
     "assigned-edu",
@@ -366,7 +367,7 @@ def parse_matrix(path: Path) -> tuple[str, list[dict[str, str]]]:
     rows: list[dict[str, str]] = []
     keys = (
         "id", "runner", "result_class", "timeout", "image", "elf",
-        "serial_log", "scenario", "mode", "reason",
+        "serial_log", "scenario", "mode", "reason", "tier",
     )
     for number, line in enumerate(lines[1:], 2):
         if not line or line.startswith("#"):
@@ -392,6 +393,10 @@ def parse_matrix(path: Path) -> tuple[str, list[dict[str, str]]]:
             raise EvidenceError(
                 f"scenario {row['id']} result class does not match its runner"
             )
+        if row["tier"] not in TIERS:
+            raise EvidenceError(
+                f"scenario {row['id']} has unrecognized tier {row['tier']!r}"
+            )
         if not row["timeout"].isdigit() or int(row["timeout"]) < 1:
             raise EvidenceError(f"scenario {row['id']} has invalid timeout")
         for key in ("image", "elf", "serial_log"):
@@ -403,11 +408,27 @@ def parse_matrix(path: Path) -> tuple[str, list[dict[str, str]]]:
     duplicates = sorted({scenario_id for scenario_id in ids if ids.count(scenario_id) > 1})
     if duplicates:
         raise EvidenceError(f"duplicate scenario ID(s): {', '.join(duplicates)}")
-    if matrix_id != "leanos-emulator-evidence-v1":
+    if matrix_id != "leanos-emulator-evidence-v2":
         raise EvidenceError(f"unsupported matrix version: {matrix_id}")
     if len(rows) != mandatory_count:
         raise EvidenceError(
             f"mandatory inventory count differs: declared {mandatory_count}, found {len(rows)}"
+        )
+    pr_runner_counts = {
+        runner: sum(
+            row["runner"] == runner and row["tier"] == "pr" for row in rows
+        )
+        for runner in RUNNERS
+    }
+    invalid_pr_runner_counts = {
+        runner: count
+        for runner, count in sorted(pr_runner_counts.items())
+        if count != 1
+    }
+    if invalid_pr_runner_counts:
+        raise EvidenceError(
+            "PR tier must contain exactly one scenario per runner; "
+            f"counts={invalid_pr_runner_counts}"
         )
 
     rows_by_id = {row["id"]: row for row in rows}
@@ -447,10 +468,12 @@ def parse_matrix(path: Path) -> tuple[str, list[dict[str, str]]]:
 
 
 def select_rows(
-    rows: list[dict[str, str]], scenario: str | None,
+    rows: list[dict[str, str]], scenario: str | None, tier: str,
     shard_index: int | None, shard_count: int | None,
 ) -> list[dict[str, str]]:
     """Select one scenario or a stable matrix-order shard."""
+    if scenario is not None and tier != "all":
+        raise EvidenceError("scenario selection cannot be combined with tier selection")
     if scenario is not None and (shard_index is not None or shard_count is not None):
         raise EvidenceError("scenario selection cannot be combined with sharding")
     if (shard_index is None) != (shard_count is None):
@@ -460,6 +483,10 @@ def select_rows(
         if not selected:
             raise EvidenceError(f"scenario is absent from matrix: {scenario}")
         return selected
+    if tier == "pr":
+        rows = [row for row in rows if row["tier"] == "pr"]
+    elif tier != "all":
+        raise EvidenceError(f"unrecognized evidence tier: {tier}")
     if shard_index is None or shard_count is None:
         return rows
     if shard_count < 1:
@@ -470,6 +497,63 @@ def select_rows(
     if not selected:
         raise EvidenceError("selected shard is empty")
     return selected
+
+
+def select_build_artifacts(
+    rows: list[dict[str, str]], version: str,
+) -> list[tuple[str, str, str, str, str]]:
+    """Return the stable minimal image/ELF inventory for selected evidence rows."""
+    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        raise EvidenceError("version must be MAJOR.MINOR.PATCH")
+    artifacts = []
+    for row in rows:
+        elf = row["elf"]
+        if not re.fullmatch(r"leanos(?:-[a-z0-9-]+)?\.elf", elf):
+            raise EvidenceError(
+                f"scenario {row['id']} has unsupported build ELF {elf!r}"
+            )
+        prelink_target = elf.removesuffix(".elf") + "-prelink.elf"
+        final_target = elf
+        # These families intentionally finish outside the generated link graph:
+        # assigned EDU converges its own page plan, while the double-fault
+        # variants run policy-specific final links after their plans exist.
+        # Name the graph prerequisite that is actually buildable at each phase
+        # instead of deriving nonexistent Make targets from the packaged ELF.
+        target_overrides = {
+            "leanos-assigned-edu.elf": ("leanos-prelink.elf", "leanos.elf"),
+            "leanos-double-fault.elf": (
+                "leanos-double-fault-prelink.elf",
+                "kernel-double-fault.o",
+            ),
+            "leanos-entry-stack-overflow.elf": (
+                "leanos-entry-stack-overflow-prelink.elf",
+                "kernel-entry-stack-overflow.o",
+            ),
+            "leanos-double-fault-guard-mapped.elf": (
+                "leanos-guard-prelink.elf",
+                "kernel-double-fault-guard-mapped.o",
+            ),
+        }
+        prelink_target, final_target = target_overrides.get(
+            elf, (prelink_target, final_target)
+        )
+        artifacts.append((
+            row["id"],
+            row["runner"],
+            row["image"].replace("@VERSION@", version),
+            prelink_target,
+            final_target,
+        ))
+    return artifacts
+
+
+def print_build_plan(args: argparse.Namespace) -> None:
+    """Emit a machine-readable build boundary before image construction."""
+    _matrix_id, rows = parse_matrix(args.matrix.resolve())
+    rows = select_rows(rows, None, args.tier, args.shard_index, args.shard_count)
+    print("id\trunner\timage\tprelink_elf\tfinal_elf")
+    for fields in select_build_artifacts(rows, args.version):
+        print("\t".join(fields))
 
 
 def expanded(row: dict[str, str], version: str, build_dir: Path) -> dict[str, Path]:
@@ -633,7 +717,9 @@ def run(args: argparse.Namespace) -> None:
     output = args.output.resolve()
     tools = args.tool_versions.resolve()
     matrix_id, rows = parse_matrix(matrix)
-    rows = select_rows(rows, args.scenario, args.shard_index, args.shard_count)
+    rows = select_rows(
+        rows, args.scenario, args.tier, args.shard_index, args.shard_count
+    )
     version = args.version
     if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
         raise EvidenceError("version must be MAJOR.MINOR.PATCH")
@@ -790,6 +876,7 @@ def run(args: argparse.Namespace) -> None:
     verify_report(
         output, matrix, build_dir, tools, version, environment,
         scenario=args.scenario,
+        tier=args.tier,
         shard_index=args.shard_index,
         shard_count=args.shard_count,
     )
@@ -824,10 +911,11 @@ def verify_iotlb_oracle_rows(path: Path, scenario_id: str) -> None:
 def verify_report(
     report_path: Path, matrix: Path, build_dir: Path, tools: Path,
     version: str, environment: dict[str, str], scenario: str | None = None,
+    tier: str = "all",
     shard_index: int | None = None, shard_count: int | None = None,
 ) -> None:
     matrix_id, rows = parse_matrix(matrix)
-    rows = select_rows(rows, scenario, shard_index, shard_count)
+    rows = select_rows(rows, scenario, tier, shard_index, shard_count)
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
@@ -1015,6 +1103,31 @@ def check_workflows() -> None:
         "build/evidence/*",
     )
     ci_content = workflow_contents[".github/workflows/ci.yml"]
+    if "  merge_group:\n    branches:\n      - main\n" not in ci_content:
+        raise EvidenceError(
+            "CI must run complete evidence for merge-queue candidates targeting main"
+        )
+    hosted_job = re.search(
+        r"(?ms)^  hosted-boundary:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
+        ci_content,
+    )
+    hosted_contract = (
+        "if: github.event_name == 'pull_request'",
+        "./scripts/check-hosted-generated-boundaries.sh ordinary",
+        "./scripts/check-hosted-generated-boundaries.sh sanitized",
+        "./scripts/check-hosted-sanitizer-negatives.sh",
+        "if-no-files-found: error",
+    )
+    if hosted_job is None or any(
+        token not in hosted_job.group("body") for token in hosted_contract
+    ) or (
+        "LEANOS_SKIP_HOSTED_BOUNDARY_REPLAY: "
+        "${{ github.event_name == 'pull_request' && '1' || '0' }}"
+        not in ci_content
+    ):
+        raise EvidenceError(
+            "CI must parallelize complete hosted evidence only for pull requests"
+        )
     ci_emulator = re.search(
         r"(?ms)^  emulator:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
         ci_content,
@@ -1023,6 +1136,10 @@ def check_workflows() -> None:
         raise EvidenceError("CI workflow does not define the emulator evidence job")
     for shard_contract in (
         "shard: [0, 1, 2, 3]",
+        "LEANOS_EVIDENCE_TIER=\"${{ github.event_name == 'pull_request' && 'pr' || 'all' }}\"",
+        "LEANOS_EVIDENCE_SHARD_INDEX=\"${{ matrix.shard }}\"",
+        "LEANOS_EVIDENCE_SHARD_COUNT=4",
+        "--tier \"${{ github.event_name == 'pull_request' && 'pr' || 'all' }}\"",
         "--shard-index ${{ matrix.shard }}",
         "--shard-count 4",
         "emulator-shard-${{ matrix.shard }}.json",
@@ -1043,6 +1160,11 @@ def check_workflows() -> None:
             "image, QEMU, reproducibility, and artifact checks"
         )
     for clang_evidence in (
+        "./scripts/build-image.sh",
+        "./scripts/write-reproducibility-manifest.sh",
+        "LEANOS_EVIDENCE_TIER=\"${{ github.event_name == 'pull_request' && 'pr' || 'all' }}\"",
+        "LEANOS_EVIDENCE_SHARD_INDEX=\"${{ github.event_name == 'pull_request' && '0' || '' }}\"",
+        "LEANOS_EVIDENCE_SHARD_COUNT=\"${{ github.event_name == 'pull_request' && '4' || '' }}\"",
         "--scenario blocking-ipc",
         "test -s build/boot/serial.log",
         "build/boot/serial.log",
@@ -1050,9 +1172,24 @@ def check_workflows() -> None:
     ):
         if clang_evidence not in ci_content:
             raise EvidenceError(
-                "CI does not enforce complete Clang canonical evidence: "
+            "CI does not preserve tiered Clang canonical evidence: "
                 + clang_evidence
             )
+    if "if [[ \"${{ github.event_name }}\" != pull_request ]]; then" not in ci_content:
+        raise EvidenceError(
+            "CI must reserve the complete canonical reproducibility manifest for non-PR evidence"
+        )
+    independent_clang = re.search(
+        r"(?ms)^  clang-reproducibility-build:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
+        ci_content,
+    )
+    if independent_clang is None or (
+        "if: github.event_name != 'pull_request'"
+        not in independent_clang.group("body")
+    ):
+        raise EvidenceError(
+            "CI must reserve the independent Clang reproducibility build for non-PR evidence"
+        )
     if "build/boot/clang-canonical.serial.log" in ci_content:
         raise EvidenceError(
             "CI names a Clang serial path outside the selected matrix scenario"
@@ -1104,12 +1241,25 @@ def main() -> int:
     subparsers = parser.add_subparsers(dest="operation", required=True)
     run_parser = subparsers.add_parser("run")
     verify_parser = subparsers.add_parser("verify")
+    plan_parser = subparsers.add_parser("build-plan")
     subparsers.add_parser("check")
     for subparser in (run_parser, verify_parser):
         subparser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
         subparser.add_argument("--build-dir", type=Path, default=DEFAULT_BUILD)
         subparser.add_argument("--tool-versions", type=Path, default=DEFAULT_TOOLS)
         subparser.add_argument("--version", default=os.environ.get("LEANOS_VERSION", "0.1.0"))
+        subparser.add_argument(
+            "--tier", choices=("all", "pr"), default="all",
+            help="select the complete evidence inventory or the versioned PR subset",
+        )
+    plan_parser.add_argument("--matrix", type=Path, default=DEFAULT_MATRIX)
+    plan_parser.add_argument(
+        "--version", default=os.environ.get("LEANOS_VERSION", "0.1.0")
+    )
+    plan_parser.add_argument(
+        "--tier", choices=("all", "pr"), default="all",
+        help="select the complete evidence inventory or the versioned PR subset",
+    )
     run_parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     run_parser.add_argument(
         "--jobs", type=int, default=max(1, os.cpu_count() or 1),
@@ -1119,7 +1269,7 @@ def main() -> int:
         "--scenario",
         help="run one named scenario from the validated matrix",
     )
-    for subparser in (run_parser, verify_parser):
+    for subparser in (run_parser, verify_parser, plan_parser):
         subparser.add_argument(
             "--shard-index", type=int,
             help="zero-based stable matrix shard to run or verify",
@@ -1137,9 +1287,12 @@ def main() -> int:
             verify_report(
                 args.report.resolve(), args.matrix.resolve(), args.build_dir.resolve(),
                 args.tool_versions.resolve(), args.version, os.environ.copy(),
+                tier=args.tier,
                 shard_index=args.shard_index, shard_count=args.shard_count,
             )
             print(f"verified emulator evidence: {display_path(args.report)}")
+        elif args.operation == "build-plan":
+            print_build_plan(args)
         else:
             check_workflows()
     except EvidenceError as error:
