@@ -36,6 +36,40 @@ structure Vector where
   expected : UInt64
   deriving Repr
 
+structure AdapterSpec where
+  name : String
+  id : Nat
+  cSymbol : String
+  arity : Nat
+
+private def adapter (name : String) (id : Nat) (cSymbol : String) (arity : Nat) : AdapterSpec :=
+  { name, id, cSymbol, arity }
+
+/-- The Lean-owned numeric and C-dispatch vocabulary consumed by both hosted
+and boot replay. Unknown names are intentionally absent so generation fails
+closed instead of silently selecting another adapter. -/
+def adapters : List AdapterSpec := [
+  adapter "KernelTransition" 0 "leanos_boot_transition" 2,
+  adapter "Syscall.scalar" 1 "leanos_syscall_demo" 4,
+  adapter "IPCSyscall.scalar" 2 "leanos_ipc_demo" 4,
+  adapter "Preemption.scalar" 3 "leanos_preemption_demo" 4,
+  adapter "Preemption.resumable" 4 "leanos_resumable_preemption_demo" 5,
+  adapter "BootAllocation.scalar" 5 "leanos_boot_consume_exact_projection" 6,
+  adapter "Interrupt.userReturn" 6 "leanos_user_return_demo" 5,
+  adapter "BlockingIPC.scalar" 7 "leanos_blocking_ipc_demo" 5,
+  adapter "CapabilityReuse.scalar" 8 "leanos_capability_reuse_demo" 5,
+  adapter "Interrupt.entry" 9 "leanos_entry_demo" 5,
+  adapter "ExtendedState.denialDispatch" 10 "leanos_extended_state_denial_demo" 6,
+  adapter "PrivilegeEntryControl.scalar" 11 "leanos_privilege_entry_control_demo" 6,
+  adapter "FaultDispatch.scalar" 12 "leanos_fault_dispatch_demo" 6,
+  adapter "DirectPortIO.scalar" 13 "leanos_direct_port_io_demo" 6,
+  adapter "Interrupt.nmi" 14 "leanos_nmi_demo" 5,
+  adapter "Interrupt.bootPhase" 15 "leanos_boot_phase_demo" 5,
+  adapter "StaleTranslation.scalar" 16 "leanos_stale_translation_demo" 6,
+  adapter "Interrupt.pageFault" 17 "leanos_page_fault_demo" 5,
+  adapter "CompositeDispatcher.stateful" 18 "leanos_composite_dispatch" 6,
+  adapter "IOTLB.scalar" 19 "leanos_iotlb_publication_demo" 6]
+
 private def boot (id : String) (state command : UInt64) : Vector :=
   { id, adapter := "KernelTransition", words := [state, command],
     expected := KernelTransition.bootTransition state command }
@@ -1090,6 +1124,8 @@ def emit : IO Unit := do
   let revision := (← IO.getEnv "LEANOS_SOURCE_REVISION").getD "unknown"
   IO.println "leanos-oracle\t1"
   IO.println s!"source-revision\t{revision}"
+  for entry in adapters do
+    IO.println s!"adapter-id\t{entry.name}\t{entry.id}\t{entry.cSymbol}\t{entry.arity}"
   for entry in vectors.zipIdx do
     IO.println (line entry.2 entry.1)
 
