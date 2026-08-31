@@ -21,7 +21,10 @@ done
 mkdir -p "$(dirname "$log")"
 : > "$log"
 command=()
-leanos_q35_command command "$qemu" 128 "$log" "$image"
+# CR4.PKE may be set only when CPUID advertises PKU.  Make that scenario
+# prerequisite explicit instead of depending on accelerator-specific feature
+# defaults; the platform builder keeps the admitted CPU string bounded.
+leanos_q35_command command "$qemu" 128 "$log" "$image" max,pku=on
 qemu_version="$($qemu --version 2>&1 | head -n 1 || true)"
 printf 'QEMU version: %s\nQEMU command:' "${qemu_version:-unknown}" >&2
 printf ' %q' "${command[@]}" >&2

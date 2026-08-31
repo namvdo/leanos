@@ -145,11 +145,15 @@ publishes that one record as `fault-containment-snapshot.txt`. Missing,
 duplicated, malformed, corrupted, or reordered snapshot/replay records are
 controlled failures.
 Two additional fresh images exercise the integrity boundary. The reserved-bit
-image clears NX from every active A leaf, disables `EFER.NXE`, restores NX only
-on the selected instruction leaf, invalidates that exact page, and executes a
-real CPL3 read whose hardware snapshot carries RSVD because NX is reserved
-while NXE is disabled. This intentionally changes the paging-controls snapshot
-and complete live page-table report. The walk-mismatch image preserves the
+image clears NX from every active A leaf, disables `EFER.NXE`, then restores NX
+and physical-address bit 48 only on the selected instruction leaf before
+invalidating that exact page. Under the pinned 48-bit MAXPHYADDR CPU profile,
+both fields are architectural RSVD witnesses: TCG supplies the NX classification
+and KVM supplies the out-of-range address classification. The real CPL3 read
+must still produce the same exact hardware error and typed terminal record; the
+runner never accepts a weaker accelerator-specific result. This intentionally
+changes the paging-controls snapshot and complete live page-table report. The
+walk-mismatch image preserves the
 hardware error, CR2, saved RIP, and live walk while changing exactly one
 expected-leaf permission bit supplied to the same generated transition. Both
 must produce one typed `PF-TERMINAL` record and debug-exit status 37. The

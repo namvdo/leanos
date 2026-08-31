@@ -282,7 +282,8 @@ if [[ -n "$page_fault_fatal_probe" ]]; then
     grep -Fq 'mov user_a_nx_fault_instruction(%rip), %rax' "$boot_source" &&
       grep -Fq 'page_table_a[i] &= ~PTE_NX;' "$kernel_source" &&
       grep -Fq 'and $~(1 << 11), %eax' "$boot_source" &&
-      grep -Fq 'page_table_a[page] |= PTE_NX;' "$kernel_source" || {
+      grep -Fq 'page_table_a[page] |= PTE_NX | (UINT64_C(1) << 48);' \
+        "$kernel_source" || {
       echo "error: vector=14 field=integrity-reserved-bit source" >&2
       exit 1
     }

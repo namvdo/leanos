@@ -125,9 +125,11 @@ decoded feature line together with the live CR0/CR4 line in
 `extended-state-control-snapshot.txt`; this is reproducible evidence for the
 pinned emulator contract, not a general hardware or CPUID theorem.
 
-The mandatory emulator matrix also builds a controlled peer-PKE image. It
-sets and reads back CR4.PKE immediately before subject B enters the common
-return path. The final pre-`iretq` validator must reject the live control tuple,
+The mandatory emulator matrix also builds a controlled peer-PKE image. Its
+bounded QEMU CPU profile explicitly enables guest-visible PKU so setting CR4.PKE
+is valid under both TCG and KVM. It sets and reads back CR4.PKE immediately
+before subject B enters the common return path. The final pre-`iretq` validator
+must reject the live control tuple,
 and the fixture records a failure if B reaches any CPL3 entry marker. Pinned
 QEMU must terminate with
 `extended-state-denial-peer-controls` after authoritative denial/dispatch and

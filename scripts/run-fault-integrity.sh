@@ -65,7 +65,8 @@ if [[ "$probe" == reserved-bit ]]; then
   expected_cr2="$(symbol_value user_a_nx_fault_instruction)"
   printf -v expected_leaf '%u' \
     "$(( (1 << 63) | (expected_cr2 / 4096) * 4096 | 7 ))"
-  expected_live_leaf="$expected_leaf"
+  printf -v expected_live_leaf '%u' \
+    "$(( expected_leaf | (1 << 48) ))"
   cpu=max,phys-bits=48
 else
   expected_cr2=0

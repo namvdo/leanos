@@ -5176,16 +5176,17 @@ void kernel_main(uint32_t multiboot_magic, uint32_t multiboot_info) {
     {
         const uint64_t page =
             (uint64_t)user_a_nx_fault_instruction / PAGE_BYTES;
-        /* TCG does not consistently raise RSVD for address bits above its
-           configured MAXPHYADDR.  Use the other architectural reserved-leaf
-           condition instead: remove NX from every active A leaf, clear
-           EFER.NXE, then retain NX only on the target leaf.  Any access through
-           that PTE must therefore raise a real vector-14 RSVD violation. */
+        /* Keep two independent architectural RSVD witnesses on this leaf.
+           TCG reliably treats NX as reserved after EFER.NXE is cleared, while
+           KVM reliably rejects physical-address bit 48 under the runner's
+           explicit 48-bit MAXPHYADDR profile.  Combining them preserves one
+           strict typed #PF contract across both accelerators without accepting
+           either accelerator's weaker classification. */
         for (unsigned i = 0; i < BOOT_LEAF_COUNT; ++i)
             page_table_a[i] &= ~PTE_NX;
         disable_nxe_for_reserved_fault();
         reserved_fault_nxe_disabled = 1;
-        page_table_a[page] |= PTE_NX;
+        page_table_a[page] |= PTE_NX | (UINT64_C(1) << 48);
         __asm__ volatile ("invlpg (%0)" :
                           : "r"(user_a_nx_fault_instruction) : "memory");
     }
