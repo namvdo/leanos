@@ -227,6 +227,22 @@ def run_fixtures() -> None:
             raise AssertionError("diagnostic bundle did not record the missing file")
 
         _, matrix_rows = evidence.parse_matrix(evidence.DEFAULT_MATRIX)
+        if evidence.qemu_accelerator({}) != "tcg":
+            raise AssertionError("default evidence accelerator is not explicit TCG")
+        if evidence.qemu_accelerator({"LEANOS_QEMU_ACCELERATOR": "kvm"}) != "kvm":
+            raise AssertionError("KVM evidence accelerator is not selectable")
+        expect_failure(
+            lambda: evidence.qemu_accelerator(
+                {"LEANOS_QEMU_ACCELERATOR": "kvm,tcg"}
+            ),
+            "fallback lists are forbidden",
+        )
+        kvm_paths = evidence.expanded(matrix_rows[0], "0.1.0", bundle_root / "build/boot")
+        _kvm_command, kvm_environment = evidence.scenario_invocation(
+            matrix_rows[0], kvm_paths, bundle_root / "build/boot", "0.1.0", "kvm"
+        )
+        if kvm_environment.get("LEANOS_QEMU_ACCELERATOR") != "kvm":
+            raise AssertionError("scenario invocation does not record KVM selection")
         shards = [
             evidence.select_rows(matrix_rows, None, "all", index, 4)
             for index in range(4)
@@ -336,7 +352,10 @@ def run_fixtures() -> None:
             raise AssertionError("build-image does not restrict final-plan checks to selected images")
         if 'validate_selected_final_plan "$build/leanos.elf"' not in build_image:
             raise AssertionError("build-image does not route the canonical final plan through selection")
-        if 'validate_selected_final_plan "$build/leanos-bootstrap64-nmi.elf"' not in build_image:
+        if (
+            'converge_selected_graph_plan "$build/leanos-bootstrap64-nmi.elf"'
+            not in build_image
+        ):
             raise AssertionError("build-image does not route special final plans through selection")
         if 'if selected_final_enabled "$build/leanos-frame-budget.elf"; then' not in build_image:
             raise AssertionError("build-image does not restrict frame-budget convergence")
@@ -451,6 +470,30 @@ def run_fixtures() -> None:
             expect_failure(
                 evidence.check_workflows,
                 "CI must reserve the independent Clang reproducibility build",
+            )
+        finally:
+            ci_workflow.write_text(original_ci, encoding="utf-8")
+
+        try:
+            ci_workflow.write_text(
+                original_ci.replace(
+                    "    continue-on-error: true\n"
+                    "    strategy:\n"
+                    "      fail-fast: false\n"
+                    "      matrix:\n"
+                    "        shard: [0, 1, 2, 3]\n",
+                    "    continue-on-error: false\n"
+                    "    strategy:\n"
+                    "      fail-fast: false\n"
+                    "      matrix:\n"
+                    "        shard: [0, 1, 2, 3]\n",
+                    1,
+                ),
+                encoding="utf-8",
+            )
+            expect_failure(
+                evidence.check_workflows,
+                "CI KVM lane must remain explicit, four-way, artifact-backed, and non-blocking",
             )
         finally:
             ci_workflow.write_text(original_ci, encoding="utf-8")
@@ -865,13 +908,18 @@ def run_fixtures() -> None:
             ),
         )
         for name, side_effect, fragment in cases:
-            _build, _output, _tools, case_args = prepare_tree(tmp / name)
+            _build, case_output, _tools, case_args = prepare_tree(tmp / name)
             with (
                 mock.patch.object(evidence, "git_revision", return_value=revision),
                 mock.patch.object(evidence, "qemu_version", return_value="QEMU fixture"),
                 mock.patch.object(evidence.subprocess, "run", side_effect=side_effect),
             ):
                 expect_failure(lambda: evidence.run(case_args), fragment)
+            failed_report = json.loads(case_output.read_text(encoding="utf-8"))
+            if failed_report["status"] != "FAIL":
+                raise AssertionError("partial evidence report does not publish FAIL")
+            if failed_report["results"][0]["status"] != "FAIL":
+                raise AssertionError("failed scenario does not publish FAIL")
 
         package = (ROOT / "scripts/package-release.sh").read_text(encoding="utf-8")
         evidence.check_release_package(package)

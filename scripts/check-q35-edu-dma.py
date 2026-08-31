@@ -11,6 +11,7 @@ fixture-owned allocator/frame identity metadata intact.
 from __future__ import annotations
 
 import argparse
+import os
 import pathlib
 import re
 import select
@@ -52,6 +53,23 @@ DMA_FROM_DEVICE = 1 << 1
 QTEST_RESPONSE_TIMEOUT_SECONDS = 5
 
 
+def selected_accelerator() -> str:
+    accelerator = os.environ.get("LEANOS_QEMU_ACCELERATOR", "tcg")
+    if accelerator not in {"tcg", "kvm"}:
+        raise RuntimeError(
+            "QEMU accelerator must be exactly 'tcg' or 'kvm'; "
+            "fallback lists are forbidden"
+        )
+    return accelerator
+
+
+def selected_cpu() -> str:
+    return (
+        "max,vendor=AuthenticAMD"
+        if selected_accelerator() == "kvm" else "max"
+    )
+
+
 class QTest:
     def __init__(self, executable: str) -> None:
         self.firmware = tempfile.NamedTemporaryFile(prefix="leanos-edu-", suffix=".bin")
@@ -62,9 +80,9 @@ class QTest:
         self.process = subprocess.Popen(
             [
                 executable,
-                "-machine", "q35,accel=tcg",
+                "-machine", f"q35,accel={selected_accelerator()}",
                 "-nodefaults",
-                "-cpu", "max",
+                "-cpu", selected_cpu(),
                 "-smp", "1",
                 "-m", "128M",
                 "-display", "none",
