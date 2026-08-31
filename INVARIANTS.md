@@ -843,11 +843,6 @@ The kernel's stateful exported boundary speaks only in numbers: its two C-callab
 - `command_encoding_injective` — No two distinct commands share an encoding.
 - `decode_encode_reply_for_trace` — Every reply token the trace can actually produce decodes back from its number to exactly itself.
 - `reply_encoding_injective` — Among replies the trace can actually produce, equal reply numbers mean equal replies.
-- `dispatchResult_control_eq_dispatch` — The control field of the logical two-word result is exactly the original scalar dispatcher result, so adding the value word cannot change the established control ABI.
-- `dispatchResult_value_eq_dispatchValue` — The value field of that logical result is exactly the allocation-free scalar value export invoked by the hosted C boundary.
-- `dispatchValue_eq_delivered_handle_iff` — The value accessor returns the canonical delivered handle exactly when the validated control word is the accepted attached-receipt reply.
-- `dispatchValue_eq_zero_iff` — Every control other than the accepted attached receipt returns the unambiguous zero no-value word.
-- `delivered_handle_decodes` — The published value `0x60003` decodes canonically as slot 3, generation 6 rather than a raw slot or reserved handle.
 - `q35_scalar_projection_matches_canonical_snapshot` — The literal device table baked into the exported boot check — every device's identity word, control word, and even the slot order — is exactly the projection of the canonical rich chipset snapshot, so the generated boundary and the rich validator cannot quietly become two different policies.
 - `validate_q35_dma_snapshot_canonical_correspondence` — On the production chipset snapshot, the exported number-only validator returns exactly the verdict the canonical rich validator computes.
 - `validate_q35_dma_snapshot_bus_master_correspondence` — The exported validator's fast rejection of a device left able to master direct memory access is exactly the rich validator's rejection of the matching corrupted snapshot.
@@ -873,6 +868,11 @@ The kernel's stateful exported boundary speaks only in numbers: its two C-callab
 - `canonicalTypedStep_refines_authoritativeGate` — Spelling out the construction: the typed step built for a state and command records exactly the authoritative gate's resulting state and result.
 - `decode_encode_typed_reply` — Encoding a state together with its trace reply and then decoding the pair yields exactly the canonical typed step for that state and command.
 - `decode_dispatch_success` — Every successful word the exported dispatcher returns decodes to the literal typed result and post-state of the same single authoritative gate invocation.
+- `dispatchResult_control_eq_dispatch` — The control field of the logical two-word result is exactly the original scalar dispatcher result, so adding the value word cannot change the established control ABI.
+- `dispatchResult_value_eq_dispatchValue` — The value field of that logical result is exactly the allocation-free scalar value export invoked by the hosted C boundary.
+- `dispatchValue_eq_delivered_handle_iff` — The value accessor returns the canonical delivered handle exactly when the validated control word is the accepted attached-receipt reply.
+- `dispatchValue_eq_zero_iff` — Every control other than the accepted attached receipt returns the unambiguous zero no-value word.
+- `delivered_handle_decodes` — The published value `0x60003` decodes canonically as slot 3, generation 6 rather than a raw slot or reserved handle.
 - `capabilityHandle_command_uses_canonical_codec` — Bookkeeping: the stale-handle probe command is built with the one canonical capability-handle code in both directions, not a private convention.
 - `mixedPhaseTwoCommands_cover_authoritative_families` — Bookkeeping: the five denial probes translate to five different families of kernel operation — a system call, a message receive, a capability copy, a blocking cancel, and a deferred drain.
 - `decode_encode_mixed_state` — Each mixed-scenario state's number decodes back to that same state.
