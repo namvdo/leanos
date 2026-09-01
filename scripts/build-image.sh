@@ -1061,10 +1061,16 @@ converge_selected_graph_plan() {
   local expected_plan="$2"
   local final_plan="$3"
   local description="$4"
+  shift 4
+  local -a relink_targets=("$@")
   local converged=false
   local pass
 
   selected_final_enabled "$elf_path" || return 0
+  ((${#relink_targets[@]} > 0)) || {
+    echo "error: $description page-table convergence has no graph relink targets" >&2
+    exit 1
+  }
   for pass in 1 2 3 4; do
     ./scripts/generate-boot-page-plan.sh "$elf_path" "$final_plan"
     if cmp -s "$expected_plan" "$final_plan"; then
@@ -1075,11 +1081,12 @@ converge_selected_graph_plan() {
 
     # A generated common object can move the final image across a page
     # boundary even when this variant's kernel source did not change. Feed the
-    # linker-resolved plan back through every selected graph target so siblings
-    # that share this plan/header are relinked from the same rebuilt object.
+    # linker-resolved plan back through every selected graph-owned sibling that
+    # shares this plan/header. Some evidence ELFs are copied or linked outside
+    # the graph and must never be passed to this Makefile.
     cp "$final_plan" "$expected_plan"
     make -f "$object_graph" "${kernel_source_make_args[@]}" \
-      -j "${LEANOS_BUILD_JOBS:-$(nproc)}" "${selected_final_targets[@]}"
+      -j "${LEANOS_BUILD_JOBS:-$(nproc)}" "${relink_targets[@]}"
   done
   [[ "$converged" == true ]] || {
     echo "error: $description page-table plan drifted after final link" >&2
@@ -1109,7 +1116,8 @@ validate_selected_final_plan "$build/leanos-bootstrap32-ud.elf" \
   "$build/boot-page-plan-bootstrap32-ud.final.h" "bootstrap32-ud probe"
 converge_selected_graph_plan "$build/leanos-bootstrap64-nmi.elf" \
   "$build/boot-page-plan-bootstrap64-nmi.h" \
-  "$build/boot-page-plan-bootstrap64-nmi.final.h" "bootstrap64-nmi probe"
+  "$build/boot-page-plan-bootstrap64-nmi.final.h" "bootstrap64-nmi probe" \
+  "$build/leanos-bootstrap64-nmi.elf"
 validate_selected_final_plan "$build/leanos-preemption.elf" \
   "$build/boot-page-plan-preemption.h" \
   "$build/boot-page-plan-preemption.final.h" preemption
@@ -1205,9 +1213,21 @@ for probe in "${fault_image_probes[@]}"; do
     exit 1
   }
 done
+extended_state_plan_targets=()
+for target in \
+  "$build/leanos-extended-state.elf" \
+  "$build/leanos-extended-state-mmx.elf" \
+  "$build/leanos-extended-state-sse.elf" \
+  "$build/leanos-extended-state-sse2.elf" \
+  "$build/leanos-extended-state-avx.elf" \
+  "$build/leanos-fast-entry-syscall.elf" \
+  "$build/leanos-fast-entry-sysenter.elf"; do
+  selected_final_enabled "$target" && extended_state_plan_targets+=("$target")
+done
 converge_selected_graph_plan "$build/leanos-extended-state.elf" \
   "$build/boot-page-plan-extended-state.h" \
-  "$build/boot-page-plan-extended-state.final.h" extended-state
+  "$build/boot-page-plan-extended-state.final.h" extended-state \
+  "${extended_state_plan_targets[@]}"
 validate_selected_final_plan "$build/leanos-extended-state-peer-pke.elf" \
   "$build/boot-page-plan-extended-state-peer-pke.h" \
   "$build/boot-page-plan-extended-state-peer-pke.final.h" peer-PKE

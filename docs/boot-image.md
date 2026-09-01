@@ -351,11 +351,12 @@ plan, links the image, and derives a plan from the linker-resolved symbols.
 both CR3 roots, all ancestor frames, and the validated boot reservation as one
 `BootPageTablePlan.Input`. It emits the canonical PTE arrays only when
 `BootPageTablePlan.compile` accepts that input. Variants whose compiled plan can
-move a page boundary are rebuilt to a bounded fixed point. Every selected ELF
-that shares the changed plan header is relinked before validation, and each
-assigned-EDU negative converges its own plan rather than assuming the canonical
-image's code extent also covers its fixture-only failure path. The build fails
-if any accepted plan does not stabilize within the bound.
+move a page boundary are rebuilt to a bounded fixed point. Every selected,
+graph-owned ELF that shares the changed plan header is relinked before
+validation; copied and policy-linked evidence artifacts stay outside that Make
+invocation. Each assigned-EDU negative converges its own plan rather than
+assuming the canonical image's code extent also covers its fixture-only failure
+path. The build fails if any accepted plan does not stabilize within the bound.
 
 The early assembly still constructs paging before generated Lean code can run.
 After paging is active, the guest walker decodes both complete live hierarchies

@@ -848,10 +848,12 @@ compute_lean_c_signature {root!s}
             final = root / "plan.final.h"
             elf = root / "image.elf"
             sibling = root / "sibling.elf"
+            outside_graph = root / "outside-graph.elf"
             graph = root / "graph.mk"
             expected.write_text("prelink-plan\n", encoding="utf-8")
             elf.write_text("linker-resolved-plan\n", encoding="utf-8")
             sibling.write_text("stale-plan\n", encoding="utf-8")
+            outside_graph.write_text("copied-artifact\n", encoding="utf-8")
             graph.write_text(
                 f".PHONY: {elf!s} {sibling!s}\n"
                 f"{elf!s}: {expected!s}\n"
@@ -865,10 +867,10 @@ set -euo pipefail
 object_graph={graph!s}
 kernel_source_make_args=()
 LEANOS_BUILD_JOBS=1
-selected_final_targets=({elf!s} {sibling!s})
 selected_final_enabled() {{ return 0; }}
 {function}
-converge_selected_graph_plan {elf!s} {expected!s} {final!s} fixture
+converge_selected_graph_plan {elf!s} {expected!s} {final!s} fixture \
+  {elf!s} {sibling!s}
 """
             subprocess.run(["bash", "-c", shell], check=True, cwd=root)
             self.assertEqual(
@@ -876,6 +878,9 @@ converge_selected_graph_plan {elf!s} {expected!s} {final!s} fixture
             )
             self.assertEqual(final.read_bytes(), expected.read_bytes())
             self.assertEqual(sibling.read_bytes(), expected.read_bytes())
+            self.assertEqual(
+                outside_graph.read_text(encoding="utf-8"), "copied-artifact\n"
+            )
 
     def test_boot_plan_cache_is_per_input_stage_and_checks_output(self) -> None:
         plan_script = PLAN_SCRIPT.read_text(encoding="utf-8")
