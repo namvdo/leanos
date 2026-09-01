@@ -18,8 +18,14 @@ import tarfile
 import tempfile
 import time
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
-ROOT = Path(__file__).resolve().parent.parent
+from workflow_yaml import WorkflowYamlError, load_workflow
+
+
+ROOT = SCRIPT_DIR.parent
 DEFAULT_MATRIX = ROOT / "scripts/emulator-evidence-matrix.tsv"
 DEFAULT_BUILD = ROOT / "build/boot"
 DEFAULT_OUTPUT = ROOT / "build/evidence/emulator-evidence.json"
@@ -1364,14 +1370,77 @@ def check_release_package(package: str) -> None:
             )
 
 
+def workflow_step_runs(
+    workflow: dict[str, object], relative: str
+) -> list[tuple[str, str]]:
+    """Return job-scoped run scripts from a structurally loaded workflow."""
+
+    jobs = workflow.get("jobs")
+    if not isinstance(jobs, dict):
+        raise EvidenceError(f"{relative} must define a jobs mapping")
+    runs: list[tuple[str, str]] = []
+    for job_name, job in jobs.items():
+        if not isinstance(job_name, str) or not isinstance(job, dict):
+            raise EvidenceError(f"{relative} job {job_name!r} must be a mapping")
+        steps = job.get("steps", [])
+        if not isinstance(steps, list):
+            raise EvidenceError(f"{relative} job {job_name!r} steps must be a sequence")
+        for step_index, step in enumerate(steps):
+            if not isinstance(step, dict):
+                raise EvidenceError(
+                    f"{relative} job {job_name!r} step {step_index} must be a mapping"
+                )
+            run = step.get("run")
+            if run is not None and not isinstance(run, str):
+                raise EvidenceError(
+                    f"{relative} job {job_name!r} step {step_index} run must be a string"
+                )
+            if run is not None:
+                runs.append((job_name, run))
+    return runs
+
+
+def workflow_job(
+    workflow: dict[str, object], relative: str, job_name: str
+) -> dict[str, object]:
+    """Return one named workflow job with a job-local structural diagnostic."""
+
+    jobs = workflow.get("jobs")
+    if not isinstance(jobs, dict):
+        raise EvidenceError(f"{relative} must define a jobs mapping")
+    job = jobs.get(job_name)
+    if not isinstance(job, dict):
+        raise EvidenceError(f"{relative} must define job {job_name!r} as a mapping")
+    return job
+
+
+def workflow_job_steps(
+    job: dict[str, object], relative: str, job_name: str
+) -> list[dict[str, object]]:
+    """Return structurally validated steps for one workflow job."""
+
+    steps = job.get("steps", [])
+    if not isinstance(steps, list) or any(
+        not isinstance(step, dict) for step in steps
+    ):
+        raise EvidenceError(f"{relative} job {job_name!r} steps must be mappings")
+    return steps
+
+
 def check_workflows() -> None:
     parse_matrix(DEFAULT_MATRIX)
-    workflow_contents: dict[str, str] = {}
+    workflows: dict[str, dict[str, object]] = {}
     for relative in (".github/workflows/ci.yml", ".github/workflows/release.yml"):
         path = ROOT / relative
-        content = path.read_text(encoding="utf-8")
-        workflow_contents[relative] = content
-        count = content.count("./scripts/run-emulator-evidence.py run")
+        try:
+            workflow = load_workflow(path)
+        except WorkflowYamlError as error:
+            raise EvidenceError(f"{relative} is not valid workflow YAML: {error}") from error
+        workflows[relative] = workflow
+        step_runs = workflow_step_runs(workflow, relative)
+        count = sum(
+            run.count("./scripts/run-emulator-evidence.py run") for _, run in step_runs
+        )
         expected_count = 2 if relative == ".github/workflows/ci.yml" else 1
         if count != expected_count:
             raise EvidenceError(
@@ -1386,10 +1455,16 @@ def check_workflows() -> None:
             "./scripts/run-bootstrap64-nmi.sh",
             "./scripts/run-malformed-handoff.sh",
         ):
-            if bypass in content:
-                raise EvidenceError(f"{relative} bypasses the shared emulator matrix with {bypass}")
-    ci_content = workflow_contents[".github/workflows/ci.yml"]
-    if "  merge_group:\n    branches:\n      - main\n" not in ci_content:
+            bypass_job = next((job for job, run in step_runs if bypass in run), None)
+            if bypass_job is not None:
+                raise EvidenceError(
+                    f"{relative} job {bypass_job!r} bypasses the shared emulator "
+                    f"matrix with {bypass}"
+                )
+    ci_workflow = workflows[".github/workflows/ci.yml"]
+    ci_triggers = ci_workflow.get("on")
+    merge_group = ci_triggers.get("merge_group") if isinstance(ci_triggers, dict) else None
+    if not isinstance(merge_group, dict) or merge_group.get("branches") != ["main"]:
         raise EvidenceError(
             "CI must run complete evidence for merge-queue candidates targeting main"
         )
@@ -1397,45 +1472,109 @@ def check_workflows() -> None:
         "github.event_name != 'pull_request' || "
         "contains(github.event.pull_request.labels.*.name, 'ci:full-admission')"
     )
+    pull_request = (
+        ci_triggers.get("pull_request") if isinstance(ci_triggers, dict) else None
+    )
+    expected_pull_request_types = [
+        "opened",
+        "synchronize",
+        "reopened",
+        "labeled",
+        "unlabeled",
+        "ready_for_review",
+    ]
+    ci_env = ci_workflow.get("env")
+    expected_evidence_tier = "${{ (" + promotion_condition + ") && 'all' || 'pr' }}"
     if (
-        "types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]"
-        not in ci_content
-        or "LEANOS_CI_EVIDENCE_TIER: ${{ (" + promotion_condition
-        + ") && 'all' || 'pr' }}" not in ci_content
+        not isinstance(pull_request, dict)
+        or pull_request.get("types") != expected_pull_request_types
+        or not isinstance(ci_env, dict)
+        or ci_env.get("LEANOS_CI_EVIDENCE_TIER") != expected_evidence_tier
     ):
         raise EvidenceError(
             "CI must promote only labeled pull requests to complete evidence"
         )
-    hosted_job = re.search(
-        r"(?ms)^  hosted-boundary:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
-        ci_content,
+    hosted_job = workflow_job(
+        ci_workflow, ".github/workflows/ci.yml", "hosted-boundary"
     )
-    hosted_contract = (
-        "if: github.event_name == 'pull_request' || github.event_name == 'merge_group'",
+    hosted_steps = workflow_job_steps(
+        hosted_job, ".github/workflows/ci.yml", "hosted-boundary"
+    )
+    hosted_runs = [
+        step.get("run")
+        for step in hosted_steps
+        if isinstance(step.get("run"), str)
+    ]
+    hosted_commands = (
         "./scripts/check-hosted-generated-boundaries.sh ordinary",
         "./scripts/check-hosted-generated-boundaries.sh sanitized",
         "./scripts/check-hosted-sanitizer-negatives.sh",
-        "if-no-files-found: error",
     )
-    if hosted_job is None or any(
-        token not in hosted_job.group("body") for token in hosted_contract
-    ) or (
-        "LEANOS_SKIP_HOSTED_BOUNDARY_REPLAY: "
+    artifact_steps = [
+        step
+        for step in hosted_steps
+        if isinstance(step.get("uses"), str)
+        and step["uses"].startswith("actions/upload-artifact@")
+    ]
+    expected_skip = (
         "${{ (github.event_name == 'pull_request' || github.event_name == "
         "'merge_group') && '1' || '0' }}"
-        not in ci_content
+    )
+    skip_is_structural = any(
+        isinstance(step.get("env"), dict)
+        and step["env"].get("LEANOS_SKIP_HOSTED_BOUNDARY_REPLAY") == expected_skip
+        for job_name in ci_workflow.get("jobs", {})
+        for step in workflow_job_steps(
+            workflow_job(ci_workflow, ".github/workflows/ci.yml", job_name),
+            ".github/workflows/ci.yml",
+            job_name,
+        )
+    )
+    if (
+        hosted_job.get("if")
+        != "github.event_name == 'pull_request' || github.event_name == 'merge_group'"
+        or any(not any(command in run for run in hosted_runs) for command in hosted_commands)
+        or not artifact_steps
+        or any(
+            not isinstance(step.get("with"), dict)
+            or step["with"].get("if-no-files-found") != "error"
+            for step in artifact_steps
+        )
+        or not skip_is_structural
     ):
         raise EvidenceError(
             "CI must parallelize complete hosted evidence for pull requests and merge groups"
         )
-    ci_emulator = re.search(
-        r"(?ms)^  emulator:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
-        ci_content,
+    ci_emulator = workflow_job(
+        ci_workflow, ".github/workflows/ci.yml", "emulator"
     )
-    if ci_emulator is None:
-        raise EvidenceError("CI workflow does not define the emulator evidence job")
+    emulator_strategy = ci_emulator.get("strategy")
+    emulator_matrix = (
+        emulator_strategy.get("matrix")
+        if isinstance(emulator_strategy, dict)
+        else None
+    )
+    if (
+        not isinstance(emulator_matrix, dict)
+        or emulator_matrix.get("shard") != [0, 1, 2, 3]
+    ):
+        raise EvidenceError(
+            "CI job 'emulator' matrix.shard must be the four shards [0, 1, 2, 3]"
+        )
+    emulator_timeout = ci_emulator.get("timeout-minutes")
+    if not isinstance(emulator_timeout, int) or emulator_timeout < 60:
+        raise EvidenceError(
+            "CI job 'emulator' timeout-minutes must allow at least 60 minutes "
+            "for image, QEMU, reproducibility, and artifact checks"
+        )
+    emulator_steps = workflow_job_steps(
+        ci_emulator, ".github/workflows/ci.yml", "emulator"
+    )
+    emulator_runs = [
+        step["run"] for step in emulator_steps if isinstance(step.get("run"), str)
+    ]
+    emulator_commands = "\n".join(emulator_runs)
     for shard_contract in (
-        "shard: [0, 1, 2, 3]",
         'LEANOS_EVIDENCE_TIER="${{ env.LEANOS_CI_EVIDENCE_TIER }}"',
         "LEANOS_EVIDENCE_SHARD_INDEX=\"${{ matrix.shard }}\"",
         "LEANOS_EVIDENCE_SHARD_COUNT=4",
@@ -1443,36 +1582,61 @@ def check_workflows() -> None:
         "--shard-index ${{ matrix.shard }}",
         "--shard-count 4",
         "emulator-shard-${{ matrix.shard }}.json",
-        "leanos-boot-${{ github.sha }}-shard-${{ matrix.shard }}",
         "./scripts/run-emulator-evidence.py bundle",
         "--output build/ci/emulator-evidence-shard-${{ matrix.shard }}.tar",
-        "path: build/ci/emulator-evidence-shard-${{ matrix.shard }}.tar",
-        "if-no-files-found: error",
-        "compression-level: 0",
     ):
-        if shard_contract not in ci_emulator.group("body"):
+        if shard_contract not in emulator_commands:
             raise EvidenceError(
-                "CI emulator evidence job does not preserve four-way shard contract: "
+                "CI job 'emulator' does not preserve its command contract: "
                 + shard_contract
             )
-    if "path: |" in ci_emulator.group("body"):
+    emulator_artifacts = [
+        step
+        for step in emulator_steps
+        if isinstance(step.get("uses"), str)
+        and step["uses"].startswith("actions/upload-artifact@")
+    ]
+    if len(emulator_artifacts) != 1:
         raise EvidenceError(
-            "CI emulator evidence job must upload one prebuilt tarball, not a YAML path list"
+            "CI job 'emulator' must publish exactly one artifact per shard"
         )
-    if ci_emulator.group("body").count("uses: actions/upload-artifact@") != 1:
+    emulator_artifact_options = emulator_artifacts[0].get("with")
+    expected_emulator_artifact = {
+        "name": "leanos-boot-${{ github.sha }}-shard-${{ matrix.shard }}",
+        "path": "build/ci/emulator-evidence-shard-${{ matrix.shard }}.tar",
+        "if-no-files-found": "error",
+        "compression-level": 0,
+    }
+    if not isinstance(emulator_artifact_options, dict) or any(
+        emulator_artifact_options.get(key) != value
+        for key, value in expected_emulator_artifact.items()
+    ):
         raise EvidenceError(
-            "CI emulator evidence job must publish exactly one artifact per shard"
+            "CI job 'emulator' upload-artifact step must publish the single "
+            "prebuilt shard tarball with fail-closed, uncompressed options"
         )
-    ci_emulator_timeout = re.search(
-        r"(?m)^    timeout-minutes:\s*(\d+)\s*$",
-        ci_emulator.group("body"),
+    clang_image = workflow_job(
+        ci_workflow, ".github/workflows/ci.yml", "clang-image"
     )
-    if ci_emulator_timeout is None or int(ci_emulator_timeout.group(1)) < 60:
-        raise EvidenceError(
-            "CI emulator evidence job must allow at least 60 minutes for "
-            "image, QEMU, reproducibility, and artifact checks"
-        )
-    for clang_evidence in (
+    clang_steps = workflow_job_steps(
+        clang_image, ".github/workflows/ci.yml", "clang-image"
+    )
+    clang_commands = "\n".join(
+        step["run"] for step in clang_steps if isinstance(step.get("run"), str)
+    )
+    clang_artifacts = [
+        step
+        for step in clang_steps
+        if isinstance(step.get("uses"), str)
+        and step["uses"].startswith("actions/upload-artifact@")
+    ]
+    clang_artifact_paths = "\n".join(
+        str(options.get("path", ""))
+        for step in clang_artifacts
+        for options in [step.get("with")]
+        if isinstance(options, dict)
+    )
+    for clang_command in (
         "./scripts/build-image.sh",
         "./scripts/write-reproducibility-manifest.sh",
         'LEANOS_EVIDENCE_TIER="${{ env.LEANOS_CI_EVIDENCE_TIER }}"',
@@ -1482,68 +1646,98 @@ def check_workflows() -> None:
         "'pr' && '4' || '' }}\"",
         "--scenario blocking-ipc",
         "test -s build/boot/serial.log",
+    ):
+        if clang_command not in clang_commands:
+            raise EvidenceError(
+                "CI job 'clang-image' does not preserve its command contract: "
+                + clang_command
+            )
+    for clang_artifact in (
         "build/boot/serial.log",
         "build/evidence/clang-canonical.json",
     ):
-        if clang_evidence not in ci_content:
+        if clang_artifact not in clang_artifact_paths:
             raise EvidenceError(
-                "CI does not preserve tiered Clang canonical evidence: "
-                + clang_evidence
+                "CI job 'clang-image' does not retain canonical artifact: "
+                + clang_artifact
             )
-    if 'if [[ "${{ env.LEANOS_CI_EVIDENCE_TIER }}" == all ]]; then' not in ci_content:
+    if 'if [[ "${{ env.LEANOS_CI_EVIDENCE_TIER }}" == all ]]; then' not in clang_commands:
         raise EvidenceError(
-            "CI must create the canonical reproducibility manifest only for complete evidence"
+            "CI job 'clang-image' must create the canonical reproducibility "
+            "manifest only for complete evidence"
         )
-    independent_clang = re.search(
-        r"(?ms)^  clang-reproducibility-build:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
-        ci_content,
+    independent_clang = workflow_job(
+        ci_workflow, ".github/workflows/ci.yml", "clang-reproducibility-build"
     )
-    if independent_clang is None or (
-        "if: " + promotion_condition
-        not in independent_clang.group("body")
-    ):
+    if independent_clang.get("if") != promotion_condition:
         raise EvidenceError(
-            "CI must run the independent Clang build for promoted complete evidence"
+            "CI job 'clang-reproducibility-build' must run only for promoted "
+            "complete evidence"
         )
-    admission = re.search(
-        r"(?ms)^  premerge-admission:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
-        ci_content,
+    admission = workflow_job(
+        ci_workflow, ".github/workflows/ci.yml", "premerge-admission"
     )
-    admission_contract = (
-        "name: Pre-merge full admission",
-        "if: always() && github.event_name == 'pull_request'",
-        "- repository-hygiene",
-        "- lean",
-        "- hosted-boundary",
-        "- clang-image",
-        "- clang-reproducibility-build",
-        "- clang-reproducibility",
-        "- emulator",
-        "PROMOTED: ${{ contains(github.event.pull_request.labels.*.name, "
+    admission_steps = workflow_job_steps(
+        admission, ".github/workflows/ci.yml", "premerge-admission"
+    )
+    admission_runs = "\n".join(
+        step["run"] for step in admission_steps if isinstance(step.get("run"), str)
+    )
+    expected_admission_needs = [
+        "repository-hygiene",
+        "lean",
+        "hosted-boundary",
+        "clang-image",
+        "clang-reproducibility-build",
+        "clang-reproducibility",
+        "emulator",
+    ]
+    expected_admission_env = {
+        "PROMOTED": "${{ contains(github.event.pull_request.labels.*.name, "
         "'ci:full-admission') }}",
-        "CLANG_REPRO_COMPARE: ${{ needs.clang-reproducibility.result }}",
-        "EMULATOR: ${{ needs.emulator.result }}",
-        'if [[ "$PROMOTED" != true ]]; then',
-        'if [[ "$result" != success ]]; then',
+        "CLANG_REPRO_COMPARE": "${{ needs.clang-reproducibility.result }}",
+        "EMULATOR": "${{ needs.emulator.result }}",
+    }
+    admission_step = next(
+        (step for step in admission_steps if isinstance(step.get("run"), str)), None
     )
-    if admission is None or any(
-        token not in admission.group("body") for token in admission_contract
+    admission_env = admission_step.get("env") if admission_step is not None else None
+    if (
+        admission.get("name") != "Pre-merge full admission"
+        or admission.get("if") != "always() && github.event_name == 'pull_request'"
+        or admission.get("needs") != expected_admission_needs
+        or not isinstance(admission_env, dict)
+        or any(
+            admission_env.get(key) != value
+            for key, value in expected_admission_env.items()
+        )
+        or 'if [[ "$PROMOTED" != true ]]; then' not in admission_runs
+        or 'if [[ "$result" != success ]]; then' not in admission_runs
     ):
         raise EvidenceError(
-            "CI must fail closed on labeled complete pre-merge admission"
+            "CI job 'premerge-admission' must fail closed on labeled complete "
+            "pre-merge admission with the full dependency and result contract"
         )
-    if "build/boot/clang-canonical.serial.log" in ci_content:
+    if "build/boot/clang-canonical.serial.log" in (
+        clang_commands + "\n" + clang_artifact_paths
+    ):
         raise EvidenceError(
             "CI names a Clang serial path outside the selected matrix scenario"
         )
-    kvm_evidence = re.search(
-        r"(?ms)^  kvm-evidence:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
-        ci_content,
+    kvm_evidence = workflow_job(
+        ci_workflow, ".github/workflows/ci.yml", "kvm-evidence"
+    )
+    kvm_strategy = kvm_evidence.get("strategy")
+    kvm_matrix = (
+        kvm_strategy.get("matrix") if isinstance(kvm_strategy, dict) else None
+    )
+    kvm_steps = workflow_job_steps(
+        kvm_evidence, ".github/workflows/ci.yml", "kvm-evidence"
+    )
+    kvm_commands = "\n".join(
+        step["run"] for step in kvm_steps if isinstance(step.get("run"), str)
     )
     kvm_contract = (
-        "runs-on: ubuntu-24.04",
-        "continue-on-error: true",
-        "shard: [0, 1, 2, 3]",
         "python3 scripts/probe-kvm.py",
         "--device /dev/kvm",
         "--env LEANOS_QEMU_ACCELERATOR=kvm",
@@ -1554,30 +1748,54 @@ def check_workflows() -> None:
         "kvm-preflight-shard-${{ matrix.shard }}.json",
         '[[ "$status" == available ]] || exit 20',
         "kvm-evidence-shard-${{ matrix.shard }}.tar",
-        "if-no-files-found: error",
     )
-    if kvm_evidence is None or any(
-        token not in kvm_evidence.group("body") for token in kvm_contract
-    ) or "container:" in kvm_evidence.group("body"):
+    kvm_artifacts = [
+        step
+        for step in kvm_steps
+        if isinstance(step.get("uses"), str)
+        and step["uses"].startswith("actions/upload-artifact@")
+    ]
+    kvm_artifact_options = (
+        kvm_artifacts[0].get("with") if len(kvm_artifacts) == 1 else None
+    )
+    if (
+        kvm_evidence.get("runs-on") != "ubuntu-24.04"
+        or kvm_evidence.get("continue-on-error") is not True
+        or "container" in kvm_evidence
+        or not isinstance(kvm_matrix, dict)
+        or kvm_matrix.get("shard") != [0, 1, 2, 3]
+        or any(token not in kvm_commands for token in kvm_contract)
+        or not isinstance(kvm_artifact_options, dict)
+        or kvm_artifact_options.get("if-no-files-found") != "error"
+    ):
         raise EvidenceError(
             "CI KVM lane must remain explicit, four-way, artifact-backed, and non-blocking"
         )
-    release_diagnostics = workflow_contents[".github/workflows/release.yml"]
-    release_gate = re.search(
-        r"(?ms)^  gate:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:\n|\Z)",
-        release_diagnostics,
+    release_workflow = workflows[".github/workflows/release.yml"]
+    release_gate = workflow_job(
+        release_workflow, ".github/workflows/release.yml", "gate"
     )
-    if release_gate is None:
-        raise EvidenceError("release workflow does not define the gated evidence job")
-    release_timeout = re.search(
-        r"(?m)^    timeout-minutes:\s*(\d+)\s*$",
-        release_gate.group("body"),
-    )
-    if release_timeout is None or int(release_timeout.group(1)) < 60:
+    release_timeout = release_gate.get("timeout-minutes")
+    if not isinstance(release_timeout, int) or release_timeout < 60:
         raise EvidenceError(
             "release evidence gate must allow at least 60 minutes for proof, "
             "reproducibility, image, and emulator checks"
         )
+    release_steps = workflow_job_steps(
+        release_gate, ".github/workflows/release.yml", "gate"
+    )
+    release_artifacts = [
+        step
+        for step in release_steps
+        if isinstance(step.get("uses"), str)
+        and step["uses"].startswith("actions/upload-artifact@")
+    ]
+    release_paths = "\n".join(
+        str(options.get("path", ""))
+        for step in release_artifacts
+        for options in [step.get("with")]
+        if isinstance(options, dict)
+    )
     for artifact in (
         "build/boot/*.map",
         "build/boot/*.disassembly.txt",
@@ -1589,7 +1807,7 @@ def check_workflows() -> None:
         "build/boot/boot-page-plan*.h",
         "build/oracle/host-results.txt",
     ):
-        if artifact not in release_diagnostics:
+        if artifact not in release_paths:
             raise EvidenceError(
                 f"release diagnostics do not retain mandatory evidence pattern {artifact}"
             )
