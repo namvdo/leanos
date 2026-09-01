@@ -166,6 +166,7 @@ generate_lean_c {source!s} {output!s}
             "leanos-prelink",
             "leanos-malformed-handoff-prelink",
             "leanos-frame-budget-prelink",
+            "leanos-capability-transfer-prelink",
             "leanos-fault-containment-prelink",
             "leanos-fault-readonly-write-prelink",
             "leanos-fault-nx-execute-prelink",

@@ -2007,6 +2007,30 @@ theorem mixedCanonicalEdges_refine :
   intro edge _hmembership
   exact canonicalMixedEdge_refines edge
 
+/-- The five machine-visible capability-transfer operations form one bounded
+authoritative trace.  The two denied uses are intentional complete-state
+stutters; every edge still obtains its typed result from `authoritativeGate`. -/
+def capabilityTransferBootEdges : List CanonicalMixedEdge :=
+  mixedCanonicalEdges.take 5
+
+theorem capabilityTransferBootEdges_refine :
+    ∀ edge ∈ capabilityTransferBootEdges, edge.Refines := by
+  intro edge hedge
+  exact mixedCanonicalEdges_refine edge (List.mem_of_mem_take hedge)
+
+theorem capabilityTransferBootResults_exact :
+    dispatch 0x0801 0x2001 0x30000 0x30000 0xCAFE 0xBEEF = 0x200901 ∧
+    dispatchValue 0x0801 0x2001 0x30000 0x30000 0xCAFE 0xBEEF = 0 ∧
+    dispatch 0x0901 0x4701 0x60003 0xCAFE 0xBEEF 0 = 0x470901 ∧
+    dispatchValue 0x0901 0x4701 0x60003 0xCAFE 0xBEEF 0 = 0 ∧
+    dispatch 0x0901 0x2101 0x30000 3 0 0 = 0x210a01 ∧
+    dispatchValue 0x0901 0x2101 0x30000 3 0 0 = 0x60003 ∧
+    dispatch 0x0a01 0x4801 0x60003 0xA174 0xB174 0 = 0x482f01 ∧
+    dispatchValue 0x0a01 0x4801 0x60003 0xA174 0xB174 0 = 0 ∧
+    dispatch 0x2f01 0x4901 0x60003 0 0 0 = 0x492f01 ∧
+    dispatchValue 0x2f01 0x4901 0x60003 0 0 0 = 0 := by
+  native_decide
+
 theorem decodeMixedCompositeState_sound word state
     (_hdecode : decodeMixedCompositeState word = .ok state) :
     mixedMaterialize state.id = .ok state.state := by

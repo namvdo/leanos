@@ -56,6 +56,8 @@ The kernel's stateful exported boundary speaks only in numbers: its two C-callab
 - `mixed_dispatch_decodes_authoritative_edge` — The central bridge: starting from the raw number the exported dispatcher returns, every accepted mixed edge decodes to an independently specified reply meaning, and the authoritative gate really carries the reconstructed pre-state to the reconstructed successor with exactly that result.
 - `canonicalMixedEdge_refines` — Every canonical mixed edge record satisfies the bridging guarantee above.
 - `mixedCanonicalEdges_refine` — All twenty-three edges of the hosted mixed corpus inherit their state and result meaning solely from that scalar-to-authoritative bridge.
+- `capabilityTransferBootEdges_refine` — Each of the five boot-visible transfer operations—offer, sealed-use denial, receipt, delegated send, and excess-right denial—refines its exact authoritative gate edge, including both state-preserving denials.
+- `capabilityTransferBootResults_exact` — The bounded boot trace has the exact published control and value words at every step, with `0x60003` exposed only by the accepted receipt and zero exposed by every other operation.
 - `decodeMixedCompositeState_sound` — Any successfully decoded mixed state token carries the guarantee that its full kernel state is the replayed one.
 - `mixedLogicalStep_refines_authoritativeGate` — Every accepted mixed logical step is exactly one authoritative gate invocation, reported with its exact outcome.
 - `mixed_state_continuity` — A mixed command either leaves the state token unchanged, advances it by exactly one position in the main sequence, or takes the named delegated-send or page-management branches — no other movement is possible.

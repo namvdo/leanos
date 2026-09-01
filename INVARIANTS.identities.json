@@ -4383,6 +4383,18 @@
     },
     {
       "source": "LeanOS/CompositeDispatcher.lean",
+      "qualified": "LeanOS.CompositeDispatcher.capabilityTransferBootEdges_refine",
+      "display": "capabilityTransferBootEdges_refine",
+      "kind": "theorem"
+    },
+    {
+      "source": "LeanOS/CompositeDispatcher.lean",
+      "qualified": "LeanOS.CompositeDispatcher.capabilityTransferBootResults_exact",
+      "display": "capabilityTransferBootResults_exact",
+      "kind": "theorem"
+    },
+    {
+      "source": "LeanOS/CompositeDispatcher.lean",
       "qualified": "LeanOS.CompositeDispatcher.command_encoding_injective",
       "display": "command_encoding_injective",
       "kind": "theorem"
