@@ -33,7 +33,7 @@ leanos_q35_cpu() {
 
   accelerator="$(leanos_qemu_accelerator)" || return 1
   case "$requested" in
-    max|max,phys-bits=48|max,pku=on) ;;
+    max|max,phys-bits=48) ;;
     *)
       echo "error: q35 platform CPU options drifted" >&2
       return 1
@@ -58,8 +58,7 @@ leanos_validate_q35_command() {
   for argument in "${q35_command[@]}"; do
     if [[ "$previous" == -cpu ]]; then
       if [[ "$argument" == "$(leanos_q35_cpu max)" ||
-            "$argument" == "$(leanos_q35_cpu max,phys-bits=48)" ||
-            "$argument" == "$(leanos_q35_cpu max,pku=on)" ]]; then
+            "$argument" == "$(leanos_q35_cpu max,phys-bits=48)" ]]; then
         ((cpu_options += 1))
       else
         echo "error: q35 platform CPU options drifted" >&2

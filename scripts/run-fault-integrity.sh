@@ -17,7 +17,9 @@ memory_mib="${LEANOS_QEMU_MEMORY_MIB:-128}"
 
 case "$probe" in
 reserved-bit)
+  accelerator="$(leanos_qemu_accelerator)"
   expected_error=12
+  [[ "$accelerator" != kvm ]] || expected_error=13
   expected_access=read
   expected_rip=user-a-reserved-fault-instruction
   expected_authorization=0
@@ -65,8 +67,7 @@ if [[ "$probe" == reserved-bit ]]; then
   expected_cr2="$(symbol_value user_a_nx_fault_instruction)"
   printf -v expected_leaf '%u' \
     "$(( (1 << 63) | (expected_cr2 / 4096) * 4096 | 7 ))"
-  printf -v expected_live_leaf '%u' \
-    "$(( expected_leaf | (1 << 48) ))"
+  expected_live_leaf="$expected_leaf"
   cpu=max,phys-bits=48
 else
   expected_cr2=0

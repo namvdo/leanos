@@ -14,13 +14,12 @@ one-vCPU default, memory, device inventory, guest images, scenario timeouts,
 serial protocol, and result classifications. Because KVM otherwise inherits
 the physical host's CPUID vendor, the KVM construction explicitly adds
 `vendor=AuthenticAMD`. This preserves the existing vendor contract on both
-Intel and AMD hosted runners. A scenario may add a reviewed feature prerequisite
-to `max` when the guest instruction is itself the evidence setup. The peer-PKE
-negative therefore uses `max,pku=on`; without guest-visible PKU, setting CR4.PKE
-would raise #GP before the return-path validator under test. KVM may still
-reject a prerequisite that the physical host or nested-virtualization layer
-cannot accelerate; that remains a scenario failure rather than a skipped check
-or emulated fallback.
+Intel and AMD hosted runners. The peer-control negative records whether its
+forbidden pre-return CR4 mutation used PKE or OSXSAVE. Pinned TCG must use PKE;
+KVM may use OSXSAVE only when guest CPUID does not expose PKU. This is an
+explicit alternate validator input, not accelerator fallback or a claim that
+PKE executed on unsupported hardware. Other host-filtered feature gaps remain
+visible as scenario failures rather than skipped checks or emulated fallback.
 
 The runner selects exactly one accelerator through
 `LEANOS_QEMU_ACCELERATOR`: `tcg` for the required emulator lane or `kvm` for
@@ -42,10 +41,8 @@ change from merging.
 
 The guest CPU contract remains QEMU's `max` virtual CPU rather than `host`, with
 the existing `AuthenticAMD` vendor fixed explicitly as
-`max,vendor=AuthenticAMD` under KVM. The bounded peer-PKE profile is
-`max,pku=on,vendor=AuthenticAMD`; arbitrary CPU feature strings remain rejected
-by the shared q35 builder. This prevents Intel-versus-AMD runner placement from
-silently changing the guest-visible vendor. The physical CPU
+`max,vendor=AuthenticAMD` under KVM. This prevents Intel-versus-AMD runner
+placement from silently changing the guest-visible vendor. The physical CPU
 model, kernel, architecture, runner image, QEMU version, accelerator list,
 source revision, and run identity are recorded as execution context. Variation
 in host-bounded feature availability is accepted as an input to this

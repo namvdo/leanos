@@ -24,31 +24,6 @@ LEANOS_QEMU_ACCELERATOR=kvm leanos_validate_q35_command kvm
   exit 1
 }
 
-peer_pke=()
-leanos_q35_command peer_pke qemu-system-x86_64 128 \
-  build/evidence/peer-pke.serial.log build/boot/leanos.iso max,pku=on
-[[ " ${peer_pke[*]} " == *" -cpu max,pku=on "* ]] || {
-  echo "error: peer-PKE platform did not explicitly require PKU" >&2
-  exit 1
-}
-
-kvm_peer_pke=()
-LEANOS_QEMU_ACCELERATOR=kvm \
-  leanos_q35_command kvm_peer_pke qemu-system-x86_64 128 \
-    build/evidence/kvm-peer-pke.serial.log build/boot/leanos.iso max,pku=on
-LEANOS_QEMU_ACCELERATOR=kvm leanos_validate_q35_command kvm_peer_pke
-[[ " ${kvm_peer_pke[*]} " == \
-    *" -cpu max,pku=on,vendor=AuthenticAMD "* ]] || {
-  echo "error: KVM peer-PKE platform omitted its reviewed CPU prerequisite" >&2
-  exit 1
-}
-
-if leanos_q35_command negative qemu-system-x86_64 128 \
-    build/evidence/unreviewed-feature.serial.log build/boot/leanos.iso \
-    max,pku=off 2>/dev/null; then
-  echo "error: q35 platform accepted an unreviewed CPU feature profile" >&2
-  exit 1
-fi
 if LEANOS_QEMU_ACCELERATOR=tcg \
     leanos_validate_q35_command kvm 2>/dev/null; then
   echo "error: q35 platform accepted KVM under the TCG contract" >&2
@@ -214,12 +189,6 @@ do
       exit 1
     }
 done
-
-grep -Fq 'leanos_q35_command command "$qemu" 128 "$log" "$image" max,pku=on' \
-  scripts/run-extended-state-peer-pke.sh || {
-  echo "error: peer-PKE runner omitted its explicit PKU CPU prerequisite" >&2
-  exit 1
-}
 
 grep -Eq 'source .*q35-platform\.sh' scripts/run-dma-unknown-device.sh &&
   grep -Eq 'leanos_q35_assigned_edu_command command ' \

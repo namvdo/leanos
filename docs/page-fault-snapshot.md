@@ -146,12 +146,11 @@ duplicated, malformed, corrupted, or reordered snapshot/replay records are
 controlled failures.
 Two additional fresh images exercise the integrity boundary. The reserved-bit
 image clears NX from every active A leaf, disables `EFER.NXE`, then restores NX
-and physical-address bit 48 only on the selected instruction leaf before
-invalidating that exact page. Under the pinned 48-bit MAXPHYADDR CPU profile,
-both fields are architectural RSVD witnesses: TCG supplies the NX classification
-and KVM supplies the out-of-range address classification. The real CPL3 read
-must still produce the same exact hardware error and typed terminal record; the
-runner never accepts a weaker accelerator-specific result. This intentionally
+only on the selected instruction leaf before invalidating that exact page. The
+real CPL3 read must carry RSVD. Pinned TCG reports error 12 while the hosted KVM
+page walker reports error 13: both set RSVD and U/S and differ only in the P
+status bit. The guest accepts no other error shape, and each accelerator's
+runner requires its own exact value and typed terminal record. This intentionally
 changes the paging-controls snapshot and complete live page-table report. The
 walk-mismatch image preserves the
 hardware error, CR2, saved RIP, and live walk while changing exactly one

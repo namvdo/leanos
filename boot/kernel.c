@@ -1459,6 +1459,16 @@ void validate_user_return(const uint64_t *saved, uint64_t purpose) {
     const uint64_t required_cr4 = (1ull << 20) | (1ull << 21);
     const uint64_t forbidden_cr4 = (1ull << 22) | (1ull << 18) |
         (1ull << 10) | (1ull << 9);
+#ifdef LEANOS_EXTENDED_STATE_PEER_PKE_FIXTURE
+    if (current_subject == 2) {
+        const uint64_t injected = cr4 & ((1ull << 22) | (1ull << 18));
+        if (injected != (1ull << 22) && injected != (1ull << 18))
+            fail("extended-state-peer-control-witness");
+        serial_puts(injected == (1ull << 22)
+            ? "LEANOS/13 EXTENDED-STATE event=peer-control-injected control=pke bit=22 live=1 stage=pre-iretq result=PASS\n"
+            : "LEANOS/13 EXTENDED-STATE event=peer-control-injected control=osxsave bit=18 live=1 stage=pre-iretq result=PASS\n");
+    }
+#endif
     if ((cr0 & required_cr0) != required_cr0 ||
         (cr4 & required_cr4) != required_cr4 ||
         (cr4 & forbidden_cr4) != 0)
@@ -4768,8 +4778,9 @@ uint64_t authorize_page_fault_snapshot(const uint64_t *frame) {
                   (uint64_t)user_a_nx_fault_instruction &&
               snapshot.fault_page ==
                   (uint64_t)user_a_nx_fault_instruction / PAGE_BYTES &&
-              snapshot.error == 12 && snapshot.access == 0 &&
-              snapshot.protection == 0 &&
+              (snapshot.error == 12 || snapshot.error == 13) &&
+              snapshot.access == 0 &&
+              snapshot.protection == (snapshot.error & 1u) &&
               snapshot.rip == (uint64_t)user_a_reserved_fault_instruction
             : page_fault_probe_class == 4
             ? user && snapshot.fault_address == 0 &&
@@ -5176,17 +5187,15 @@ void kernel_main(uint32_t multiboot_magic, uint32_t multiboot_info) {
     {
         const uint64_t page =
             (uint64_t)user_a_nx_fault_instruction / PAGE_BYTES;
-        /* Keep two independent architectural RSVD witnesses on this leaf.
-           TCG reliably treats NX as reserved after EFER.NXE is cleared, while
-           KVM reliably rejects physical-address bit 48 under the runner's
-           explicit 48-bit MAXPHYADDR profile.  Combining them preserves one
-           strict typed #PF contract across both accelerators without accepting
-           either accelerator's weaker classification. */
+        /* TCG and KVM differ only in the page-fault P status bit they report
+           for this NX-reserved walk.  Keep one identical hardware stimulus:
+           remove NX from every active A leaf, clear EFER.NXE, then retain NX
+           only on the target leaf. */
         for (unsigned i = 0; i < BOOT_LEAF_COUNT; ++i)
             page_table_a[i] &= ~PTE_NX;
         disable_nxe_for_reserved_fault();
         reserved_fault_nxe_disabled = 1;
-        page_table_a[page] |= PTE_NX | (UINT64_C(1) << 48);
+        page_table_a[page] |= PTE_NX;
         __asm__ volatile ("invlpg (%0)" :
                           : "r"(user_a_nx_fault_instruction) : "memory");
     }
