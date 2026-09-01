@@ -107,6 +107,8 @@ python3 scripts/test-setup-lean-cache.py
 
 ./scripts/test-build-timing.py
 
+./scripts/test-image-bundle.sh
+
 ./scripts/run-emulator-evidence.py check
 
 lake env lean -DwarningAsError=true -R experiments/freestanding-boundary \
