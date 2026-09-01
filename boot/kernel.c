@@ -413,7 +413,7 @@ static uint64_t frame_budget_user_page = UINT64_MAX;
    dispatcher.  The C bridge has no transfer table, capability projection,
    rights mask, destination slot, child identity, or expected post-state. */
 static uint64_t capability_transfer_state =
-    LEANOS_COMPOSITE_STATE_MIXED_INITIAL;
+    LEANOS_COMPOSITE_STATE_BOOT_TRANSFER_SUBJECT_ONE;
 #endif
 #ifdef LEANOS_FAULT_CONTAINMENT_SCENARIO
 /* Exact generated-adapter result retained across the checked peer restore.
@@ -3948,40 +3948,60 @@ uint64_t syscall_handler(uint64_t number, uint64_t arg0, uint64_t arg1,
         capability_transfer_state = control & UINT64_C(0xffff);
 
         if (number == 26) {
-            if (control != LEANOS_COMPOSITE_REPLY_TRANSFER_OFFERED ||
+            if (control != LEANOS_COMPOSITE_REPLY_BOOT_TRANSFER_OFFERED ||
                 value != LEANOS_COMPOSITE_NO_VALUE)
                 fail("capability-transfer-offer-result");
-            serial_puts("LEANOS/22 OFFER subject=1 address-space=1 origin=cpl3 source-handle=196608 transfer-endpoint=196608 child=6 parent=3 rights=send sealed=1 installed=0 payload0=51966 payload1=48879 control=2099457 value=0 result=PASS\n");
+            serial_puts("LEANOS/22 OFFER subject=1 address-space=1 origin=cpl3 source-handle=131073 transfer-endpoint=131073 child=6 parent=2 rights=send sealed=1 installed=0 payload0=51966 payload1=48879 control=2118145 value=0 result=PASS\n");
+
+            /* The caller change is itself an authoritative generated edge.
+               Only its exact typed resume result authorizes installation of
+               B's fixed kernel-owned register bank and CR3 below. */
+            const uint64_t switch_prestate = capability_transfer_state;
+            const uint64_t switch_command =
+                LEANOS_COMPOSITE_COMMAND_BOOT_TRANSFER_SWITCH_SUBJECT_TWO;
+            const uint64_t switch_control = leanos_composite_dispatch(
+                switch_prestate, switch_command, 0, 0, 0, 0);
+            const uint64_t switch_value = leanos_composite_dispatch_value(
+                switch_prestate, switch_command, 0, 0, 0, 0);
+            if (switch_control !=
+                    LEANOS_COMPOSITE_REPLY_BOOT_TRANSFER_SWITCHED ||
+                switch_value != LEANOS_COMPOSITE_NO_VALUE)
+                fail("capability-transfer-switch-result");
+            capability_transfer_state =
+                switch_control & UINT64_C(0xffff);
             current_subject = 2;
-            serial_puts("LEANOS/22 DISPATCH subject=2 address-space=2 source=kernel-owned-context result=PASS\n");
+            serial_puts("LEANOS/22 DISPATCH subject=2 address-space=2 source=authoritative-resumable-context control=4870913 value=0 result=PASS\n");
             return UINT64_C(0xfeed);
         }
         if (number == 27) {
-            if (control != LEANOS_COMPOSITE_REPLY_SEALED_HANDLE_REJECTED ||
+            if (control !=
+                    LEANOS_COMPOSITE_REPLY_BOOT_TRANSFER_SEALED_HANDLE_REJECTED ||
                 value != LEANOS_COMPOSITE_NO_VALUE)
                 fail("capability-transfer-sealed-result");
             serial_puts("LEANOS/22 ENTER subject=2 address-space=2 origin=cpl3 context=fresh result=PASS\n");
-            serial_puts("LEANOS/22 SEALED-DENIAL subject=2 handle=393219 operation=send authorized=0 reason=not-installed state=unchanged control=4655361 value=0 result=PASS\n");
+            serial_puts("LEANOS/22 SEALED-DENIAL subject=2 handle=393219 operation=send authorized=0 reason=not-installed state=unchanged control=4674305 value=0 result=PASS\n");
             return value;
         }
         if (number == 28) {
-            if (control != LEANOS_COMPOSITE_REPLY_TRANSFER_ACCEPTED ||
+            if (control != LEANOS_COMPOSITE_REPLY_BOOT_TRANSFER_ACCEPTED ||
                 value != LEANOS_COMPOSITE_DELIVERED_HANDLE)
                 fail("capability-transfer-accept-result");
-            serial_puts("LEANOS/22 ACCEPT subject=2 address-space=2 origin=cpl3 transfer-endpoint=196608 destination-slot=3 child=6 generation=6 handle=393219 sealed=0 installed=1 exactly-once=1 control=2165249 value=393219 result=PASS\n");
+            serial_puts("LEANOS/22 ACCEPT subject=2 address-space=2 origin=cpl3 transfer-endpoint=196608 destination-slot=3 child=6 generation=6 handle=393219 sealed=0 installed=1 exactly-once=1 control=2184193 value=393219 result=PASS\n");
             return value;
         }
         if (number == 29) {
-            if (control != LEANOS_COMPOSITE_REPLY_DELEGATED_SEND_ACCEPTED ||
+            if (control !=
+                    LEANOS_COMPOSITE_REPLY_BOOT_TRANSFER_DELEGATED_SEND ||
                 value != LEANOS_COMPOSITE_NO_VALUE)
                 fail("capability-transfer-send-result");
-            serial_puts("LEANOS/22 DELEGATED-SEND subject=2 handle=393219 endpoint=3 payload0=41332 payload1=45428 right=send authorized=1 mailbox=filled control=4730625 value=0 result=PASS\n");
+            serial_puts("LEANOS/22 DELEGATED-SEND subject=2 handle=393219 endpoint=3 payload0=41332 payload1=45428 right=send authorized=1 mailbox=filled control=4740353 value=0 result=PASS\n");
             return value;
         }
-        if (control != LEANOS_COMPOSITE_REPLY_DELEGATED_RECEIVE_REJECTED ||
+        if (control !=
+                LEANOS_COMPOSITE_REPLY_BOOT_TRANSFER_DELEGATED_RECEIVE_REJECTED ||
             value != LEANOS_COMPOSITE_NO_VALUE)
             fail("capability-transfer-receive-result");
-        serial_puts("LEANOS/22 EXCESS-RIGHT-DENIAL subject=2 handle=393219 operation=receive authorized=0 reason=rights state=unchanged mailbox=filled control=4796161 value=0 result=PASS\n");
+        serial_puts("LEANOS/22 EXCESS-RIGHT-DENIAL subject=2 handle=393219 operation=receive authorized=0 reason=rights state=unchanged mailbox=filled control=4805889 value=0 result=PASS\n");
         serial_puts("LEANOS/22 UNRELATED slots-a=unchanged slots-b-except-3=unchanged contexts=unchanged canaries=preserved mailbox=delegated-message-only result=PASS\n");
         serial_puts("LEANOS/22 FINAL status=PASS offer=1 sealed-denied=1 receipt=1 exact-handle=1 delegated-send=1 excess-right-denied=1 unrelated=unchanged\n");
         finish(0x10);

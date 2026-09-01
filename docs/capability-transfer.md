@@ -89,14 +89,19 @@ generated-C differential tests.
 
 ## Bounded boot slice
 
-The `capability-transfer` boot image connects the same five canonical mixed
-edges to syscall numbers 26 through 30. Subject A offers its generation-bound
-source handle and a send-only request. The existing complete-context return
-path replaces A's saved register bank and CR3 with the kernel-owned subject-B
-context. B first demonstrates that the sealed handle cannot send, accepts into
-slot 3, retains the returned `0x60003` word in a register, sends through that
-exact word, and receives a state-preserving denial when it tries the
-nondelegated receive right.
+The `capability-transfer` boot image connects five user operations plus one
+kernel scheduling operation to a dedicated canonical trace. Subject A is
+formally bound to subject 1 and resolves its own generation-bound `0x20001`
+endpoint/source handle before offering a send-only descendant. An explicit
+authoritative resumable edge then selects subject 2; only its exact generated
+reply authorizes the existing complete-context return path to replace A's
+saved register bank and CR3 with the kernel-owned subject-B context. B first
+demonstrates that the sealed handle cannot send, accepts into slot 3, retains
+the returned `0x60003` word in a register, sends through that exact word, and
+receives a state-preserving denial when it tries the nondelegated receive
+right. A regression theorem checks the initial caller, source-handle
+resolution, sealed record `(sender = 1, parent = 2)`, and post-switch
+`(subject, address space) = (2, 2)` binding directly.
 
 C retains one opaque canonical state token. After each generated call it
 derives the next token from the generated control word; there is no C pending

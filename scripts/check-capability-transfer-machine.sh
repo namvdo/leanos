@@ -35,8 +35,8 @@ transfer_source="$(
   exit 1
 }
 for accessor in leanos_composite_dispatch leanos_composite_dispatch_value; do
-  [[ "$(grep -Fc "${accessor}(" <<< "$transfer_source")" -eq 1 ]] || {
-    echo "error: capability-transfer adapter must call ${accessor} exactly once" >&2
+  [[ "$(grep -Fc "${accessor}(" <<< "$transfer_source")" -eq 2 ]] || {
+    echo "error: capability-transfer adapter must call ${accessor} once for the user edge and once for the authoritative switch" >&2
     exit 1
   }
 done
@@ -61,6 +61,16 @@ grep -Fq 'capability_transfer_state = control & UINT64_C(0xffff);' \
   echo "error: capability-transfer state token is not derived from generated control" >&2
   exit 1
 }
+grep -Fq 'switch_prestate, switch_command, 0, 0, 0, 0' \
+  <<< "$transfer_source" || {
+  echo "error: capability-transfer subject switch is not generated from one immutable input tuple" >&2
+  exit 1
+}
+grep -Fq 'LEANOS_COMPOSITE_REPLY_BOOT_TRANSFER_SWITCHED' \
+  <<< "$transfer_source" || {
+  echo "error: capability-transfer subject switch lacks exact generated authorization" >&2
+  exit 1
+}
 
 handler="$(sed -n '/<syscall_handler>:/,/<timer_handler>:/p' "$dump")"
 for accessor in leanos_composite_dispatch leanos_composite_dispatch_value; do
@@ -73,6 +83,7 @@ for diagnostic in \
   capability-transfer-caller-context \
   capability-transfer-generated-rejection \
   capability-transfer-value-shape \
+  capability-transfer-switch-result \
   capability-transfer-syscall; do
   strings "$elf" | grep -Fx "$diagnostic" >/dev/null || {
     echo "error: capability-transfer final ELF lacks fail-closed diagnostic ${diagnostic}" >&2
@@ -104,6 +115,11 @@ user_b="$(objdump -d --start-address="$user_b_start" \
   --stop-address="$user_b_end" "$elf")"
 [[ "$(grep -Ec 'int[[:space:]]+\$0x80' <<< "$user_a")" -eq 1 ]] || {
   echo "error: capability-transfer subject A syscall inventory drifted" >&2
+  exit 1
+}
+grep -Eq 'mov[[:space:]]+\$0x20001,%[er]?bx' <<< "$user_a" &&
+  grep -Eq 'mov[[:space:]]+\$0x20001,%[er]?cx' <<< "$user_a" || {
+  echo "error: subject A does not offer its own generation-bound endpoint handle" >&2
   exit 1
 }
 [[ "$(grep -Ec 'int[[:space:]]+\$0x80' <<< "$user_b")" -eq 4 ]] || {

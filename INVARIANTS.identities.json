@@ -4395,6 +4395,12 @@
     },
     {
       "source": "LeanOS/CompositeDispatcher.lean",
+      "qualified": "LeanOS.CompositeDispatcher.capabilityTransferBoot_actor_binding_exact",
+      "display": "capabilityTransferBoot_actor_binding_exact",
+      "kind": "theorem"
+    },
+    {
+      "source": "LeanOS/CompositeDispatcher.lean",
       "qualified": "LeanOS.CompositeDispatcher.command_encoding_injective",
       "display": "command_encoding_injective",
       "kind": "theorem"
@@ -6599,6 +6605,12 @@
       "source": "LeanOS/FailStop.lean",
       "qualified": "LeanOS.FailStop.capabilityRevoke_then_scheduleRemove_preserves_runtimeWellFormed",
       "display": "capabilityRevoke_then_scheduleRemove_preserves_runtimeWellFormed",
+      "kind": "theorem"
+    },
+    {
+      "source": "LeanOS/FailStop.lean",
+      "qualified": "LeanOS.FailStop.capabilityTransferBootInitial_authoritativeRuntimeWellFormed",
+      "display": "capabilityTransferBootInitial_authoritativeRuntimeWellFormed",
       "kind": "theorem"
     },
     {
@@ -12899,6 +12911,12 @@
       "source": "LeanOS/Oracle.lean",
       "qualified": "LeanOS.Oracle.hosted_budget_vectors_exact",
       "display": "hosted_budget_vectors_exact",
+      "kind": "theorem"
+    },
+    {
+      "source": "LeanOS/Oracle.lean",
+      "qualified": "LeanOS.Oracle.hosted_capability_transfer_boot_vectors_exact",
+      "display": "hosted_capability_transfer_boot_vectors_exact",
       "kind": "theorem"
     },
     {

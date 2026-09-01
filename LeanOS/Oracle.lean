@@ -216,6 +216,27 @@ def mixedEdgeVector (edge : CompositeDispatcher.CanonicalMixedEdge) : Vector :=
 def mixedVectors : List Vector :=
   CompositeDispatcher.mixedCanonicalEdges.map mixedEdgeVector
 
+private def capabilityTransferBootEdgeId :
+    CompositeDispatcher.CapabilityTransferBootCommandId → String
+  | .offer => "composite.boot-transfer-subject-one-offer"
+  | .switchToSubjectTwo => "composite.boot-transfer-switch-subject-two"
+  | .rejectSealedHandle => "composite.boot-transfer-sealed-denial"
+  | .accept => "composite.boot-transfer-subject-two-accept"
+  | .delegatedSend => "composite.boot-transfer-delegated-send"
+  | .rejectDelegatedReceive => "composite.boot-transfer-receive-denial"
+
+def capabilityTransferBootEdgeVector
+    (edge : CompositeDispatcher.CanonicalCapabilityTransferBootEdge) : Vector :=
+  let words :=
+    CompositeDispatcher.encodeCapabilityTransferBootCommand edge.command
+  composite (capabilityTransferBootEdgeId edge.command)
+    (CompositeDispatcher.encodeCapabilityTransferBootState edge.state)
+    words.tag words.arg0 words.arg1 words.arg2 words.arg3
+
+def capabilityTransferBootVectors : List Vector :=
+  CompositeDispatcher.capabilityTransferBootEdges.map
+    capabilityTransferBootEdgeVector
+
 private def invalidationEdgeId :
     CompositeDispatcher.InvalidationReplyId → String
   | .wrongOwnerRejected => "composite.invalidation-wrong-owner-reject"
@@ -668,9 +689,9 @@ def vectors : List Vector := [
     0xffffffffffffffff 0xffffffffffffffff 0xffffffffffffffff 0xffffffffffffffff,
   composite "composite.unknown-command" 0x0101 0x0001 0 0 0 0] ++
   mixedVectors ++ invalidationVectors ++ invalidationNegativeVectors ++
-    budgetVectors ++ iotlbPublicationVectors
+    budgetVectors ++ iotlbPublicationVectors ++ capabilityTransferBootVectors
 
-theorem corpus_shape : vectors.length = 392 := by decide
+theorem corpus_shape : vectors.length = 398 := by decide
 /-- Oracle indices 314--336 are definitionally the complete canonical mixed
 edge corpus, rather than a second hand-maintained scalar table. -/
 theorem hosted_mixed_vectors_exact :
@@ -682,7 +703,11 @@ theorem hosted_budget_vectors_exact :
     (vectors.drop 359).take budgetVectors.length = budgetVectors := by rfl
 
 theorem hosted_iotlb_publication_vectors_exact :
-    vectors.drop 383 = iotlbPublicationVectors := by rfl
+    (vectors.drop 383).take iotlbPublicationVectors.length =
+      iotlbPublicationVectors := by rfl
+
+theorem hosted_capability_transfer_boot_vectors_exact :
+    vectors.drop 392 = capabilityTransferBootVectors := by rfl
 
 private def iotlbPublicationAdapterAgrees (vector : Vector) : Bool :=
   match vector.adapter, vector.words with
@@ -692,7 +717,8 @@ private def iotlbPublicationAdapterAgrees (vector : Vector) : Bool :=
   | _, _ => true
 
 theorem hosted_iotlb_publication_adapter_agrees :
-    (vectors.drop 383).all iotlbPublicationAdapterAgrees = true := by
+    ((vectors.drop 383).take iotlbPublicationVectors.length).all
+      iotlbPublicationAdapterAgrees = true := by
   native_decide
 
 theorem hosted_budget_canonical_sequence :
@@ -757,12 +783,15 @@ theorem composite_mixed_trace_agrees :
     (vectors[336]).expected = 0x462e01 := by
   native_decide
 
-/-- The accepted attached receipt is the only composite corpus row that
-publishes a value word; all data-only successes and rejections publish zero. -/
+/-- Only the accepted hosted-mixed receipt and the independently modeled
+machine A-to-B receipt publish a value word. All data-only successes,
+scheduling edges, and rejections publish zero. -/
 theorem composite_result_values_exact :
     (vectors[316]).id = "composite.mixed-transfer-accept" ∧
     (vectors[316]).expectedValue = 0x60003 ∧
-    (vectors.filter (fun vector => vector.expectedValue ≠ 0)).length = 1 := by
+    (vectors[395]).id = "composite.boot-transfer-subject-two-accept" ∧
+    (vectors[395]).expectedValue = 0x60003 ∧
+    (vectors.filter (fun vector => vector.expectedValue ≠ 0)).length = 2 := by
   native_decide
 
 theorem boot_decoder_roundtrip_cold :

@@ -1631,8 +1631,8 @@ user_a_entry:
     mov %ax, %ds
     mov %ax, %es
     mov $26, %rax
-    mov $0x30000, %rbx
-    mov $0x30000, %rcx
+    mov $0x20001, %rbx
+    mov $0x20001, %rcx
     mov $0xcafe, %rdx
     mov $0xbeef, %rsi
     int $0x80
