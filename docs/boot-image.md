@@ -344,14 +344,18 @@ to the Lean model or verifies the boot chain.
 
 ## Linked page-table plan boundary
 
-`scripts/build-image.sh` now performs a size-stable two-pass link for each boot
-variant. The prelink uses fixed-size placeholder arrays solely to determine the
-final linker symbol addresses. `scripts/generate-boot-page-plan.sh` passes those
-addresses to the host-only `leanos-boot-plan` executable, which constructs all
-8,192 candidate leaves, both CR3 roots, all ancestor frames, and the validated
-boot reservation as one `BootPageTablePlan.Input`. It emits the canonical PTE
-arrays only when `BootPageTablePlan.compile` accepts that input. The final link
-is rejected if regenerating from its symbols changes the emitted arrays.
+`scripts/build-image.sh` starts each boot variant with a fixed-size placeholder
+plan, links the image, and derives a plan from the linker-resolved symbols.
+`scripts/generate-boot-page-plan.sh` passes those addresses to the host-only
+`leanos-boot-plan` executable, which constructs all 8,192 candidate leaves,
+both CR3 roots, all ancestor frames, and the validated boot reservation as one
+`BootPageTablePlan.Input`. It emits the canonical PTE arrays only when
+`BootPageTablePlan.compile` accepts that input. Variants whose compiled plan can
+move a page boundary are rebuilt to a bounded fixed point. Every selected ELF
+that shares the changed plan header is relinked before validation, and each
+assigned-EDU negative converges its own plan rather than assuming the canonical
+image's code extent also covers its fixture-only failure path. The build fails
+if any accepted plan does not stabilize within the bound.
 
 The early assembly still constructs paging before generated Lean code can run.
 After paging is active, the guest walker decodes both complete live hierarchies

@@ -1075,11 +1075,11 @@ converge_selected_graph_plan() {
 
     # A generated common object can move the final image across a page
     # boundary even when this variant's kernel source did not change. Feed the
-    # linker-resolved plan back through the graph-owned object and ELF target
-    # until the plan describes the ELF that actually embeds it.
+    # linker-resolved plan back through every selected graph target so siblings
+    # that share this plan/header are relinked from the same rebuilt object.
     cp "$final_plan" "$expected_plan"
     make -f "$object_graph" "${kernel_source_make_args[@]}" \
-      -j "${LEANOS_BUILD_JOBS:-$(nproc)}" "$elf_path"
+      -j "${LEANOS_BUILD_JOBS:-$(nproc)}" "${selected_final_targets[@]}"
   done
   [[ "$converged" == true ]] || {
     echo "error: $description page-table plan drifted after final link" >&2
@@ -1205,7 +1205,7 @@ for probe in "${fault_image_probes[@]}"; do
     exit 1
   }
 done
-validate_selected_final_plan "$build/leanos-extended-state.elf" \
+converge_selected_graph_plan "$build/leanos-extended-state.elf" \
   "$build/boot-page-plan-extended-state.h" \
   "$build/boot-page-plan-extended-state.final.h" extended-state
 validate_selected_final_plan "$build/leanos-extended-state-peer-pke.elf" \
