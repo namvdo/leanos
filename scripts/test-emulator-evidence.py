@@ -441,6 +441,19 @@ def run_fixtures() -> None:
 
         try:
             ci_workflow.write_text(
+                original_ci.replace("./scripts/build-image.sh", "./scripts/build.sh", 1),
+                encoding="utf-8",
+            )
+            expect_failure(
+                evidence.check_workflows,
+                "CI job 'clang-image' does not preserve its command contract: "
+                "./scripts/build-image.sh",
+            )
+        finally:
+            ci_workflow.write_text(original_ci, encoding="utf-8")
+
+        try:
+            ci_workflow.write_text(
                 original_ci.replace(
                     "types: [opened, synchronize, reopened, labeled, unlabeled, "
                     "ready_for_review]",
@@ -508,7 +521,8 @@ def run_fixtures() -> None:
             )
             expect_failure(
                 evidence.check_workflows,
-                "CI must run the independent Clang build for promoted complete evidence",
+                "CI job 'clang-reproducibility-build' must run only for promoted "
+                "complete evidence",
             )
         finally:
             ci_workflow.write_text(original_ci, encoding="utf-8")
@@ -526,7 +540,8 @@ def run_fixtures() -> None:
             )
             expect_failure(
                 evidence.check_workflows,
-                "CI must fail closed on labeled complete pre-merge admission",
+                "CI job 'premerge-admission' must fail closed on labeled complete "
+                "pre-merge admission",
             )
         finally:
             ci_workflow.write_text(original_ci, encoding="utf-8")
