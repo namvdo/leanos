@@ -21191,6 +21191,24 @@ def compositeDispatcherTimerFrame : Interrupt.HardwareFrame :=
 def compositeDispatcherTimerRegisters : ResumablePreemption.Registers :=
   blockingEvidenceRegisters 0x11
 
+/-- The machine capability-transfer trace begins in subject 1 by executing one
+authoritative resumable switch from the shared dispatcher seed.  This keeps
+the caller/address-space binding and the saved subject-2 continuation inside
+the same transition system used by every later transfer edge. -/
+def capabilityTransferBootInitial (plan : BootPageTablePlan.Plan) : CompositeState :=
+  (authoritativeGate (compositeDispatcherInitial plan)
+    (.ordinary (.resumePreempt compositeDispatcherTimerFrame
+      compositeDispatcherBlockingRegisters))).state
+
+theorem capabilityTransferBootInitial_authoritativeRuntimeWellFormed
+    (plan : BootPageTablePlan.Plan) :
+    AuthoritativeRuntimeWellFormed (capabilityTransferBootInitial plan) := by
+  exact authoritativeGate_preserves_authoritativeRuntimeWellFormed
+    (compositeDispatcherInitial plan)
+    (.ordinary (.resumePreempt compositeDispatcherTimerFrame
+      compositeDispatcherBlockingRegisters))
+    (compositeDispatcherInitial_authoritativeRuntimeWellFormed plan)
+
 /-- Seed for the in-flight revocation trace (#175).  From the shared dispatcher
 seed, subject 2 delegates a revoke-only authority on endpoint 10 into subject
 1's slot 2, then the authoritative timer switch makes subject 1 current with

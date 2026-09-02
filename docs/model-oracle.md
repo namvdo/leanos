@@ -14,7 +14,7 @@ freestanding adapter: `KernelTransition.bootTransition` and
 `IOMMU.IOTLB.iotlbPublicationDemo`, and
 `InterruptEntry.pageFaultDemo`, plus the stateful
 `CompositeDispatcher.dispatch` and `CompositeDispatcher.dispatchValue`. Its stable
-406-vector order covers accepted calls,
+412-vector order covers accepted calls,
 typed decoding failures, invalid state and permission encodings, boot-handoff
 and publication-order failures, both bounded A/B preemption directions, and
 maximum `UInt64` boundary words, plus accepted initial/syscall/scheduler returns
@@ -122,6 +122,13 @@ state replay and cross-trace splicing, unknown/reserved operations, and maximum
 words. `FrameBudgetScenario.step_refinement` connects every accepted edge to
 the exact admitted-budget transition, while the hosted generated-C harness
 reports the first mismatching operation and reply.
+
+Rows 392 through 397 are the dedicated machine A-to-B capability-transfer
+corpus for issue #174. Unlike the older mixed trace, this slice begins with
+subject 1 current, performs an explicit authoritative switch to subject 2,
+denies the sealed future handle before receipt, publishes `0x60003` only from
+the accepted receipt, accepts a send through the attenuated send-only handle,
+and rejects receive authority without changing the complete state.
 
 The final fourteen records are the in-flight revocation corpus for issue #175.
 Its seed is `FailStop.inFlightRevocationInitial`: from the shared two-subject

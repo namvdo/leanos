@@ -21,10 +21,10 @@
  * truncation is rejected by that caller before this scalar function is called.
  *
  * Every state and command word has ABI version 1 in bits 0..7. State bits
- * 8..15 select one of 66 canonical states and all upper bits are reserved.
- * Command tags use bits 8..15 to select one of 73 command selectors and all
+ * 8..15 select one of 71 canonical states and all upper bits are reserved.
+ * Command tags use bits 8..15 to select one of 79 command selectors and all
  * upper bits are reserved. Three selectors have an additional state-scoped
- * delegated-transfer meaning, for 65 semantic commands in total. Arguments
+ * delegated-transfer meaning, for 82 semantic commands in total. Arguments
  * not named by a command must be zero. A success result word zero uses bits
  * 0..7 for the version, 8..15 for the next-state selector,
  * 16..23 for the typed-reply selector, and reserves bits 24..63. Error words
@@ -37,8 +37,8 @@
 #define LEANOS_COMPOSITE_RESULT_VALUE_WORD 1U
 #define LEANOS_COMPOSITE_NO_VALUE UINT64_C(0)
 #define LEANOS_COMPOSITE_DELIVERED_HANDLE UINT64_C(0x60003)
-#define LEANOS_COMPOSITE_STATE_COUNT 66U
-#define LEANOS_COMPOSITE_COMMAND_COUNT 73U
+#define LEANOS_COMPOSITE_STATE_COUNT 71U
+#define LEANOS_COMPOSITE_COMMAND_COUNT 79U
 
 #define LEANOS_COMPOSITE_STATE_INITIAL UINT64_C(0x0001)
 #define LEANOS_COMPOSITE_STATE_SUBJECT_CREATED UINT64_C(0x0101)
@@ -102,6 +102,13 @@
 #define LEANOS_COMPOSITE_STATE_BUDGET_A_RELEASED UINT64_C(0x4901)
 #define LEANOS_COMPOSITE_STATE_BUDGET_RELEASE_DENIED UINT64_C(0x4a01)
 #define LEANOS_COMPOSITE_STATE_BUDGET_RELEASE_COMPLETE UINT64_C(0x4b01)
+
+/* Dedicated machine A-to-B transfer states. */
+#define LEANOS_COMPOSITE_STATE_BOOT_TRANSFER_SUBJECT_ONE UINT64_C(0x5101)
+#define LEANOS_COMPOSITE_STATE_BOOT_TRANSFER_OFFERED UINT64_C(0x5201)
+#define LEANOS_COMPOSITE_STATE_BOOT_TRANSFER_SUBJECT_TWO UINT64_C(0x5301)
+#define LEANOS_COMPOSITE_STATE_BOOT_TRANSFER_ACCEPTED UINT64_C(0x5401)
+#define LEANOS_COMPOSITE_STATE_BOOT_TRANSFER_SENT UINT64_C(0x5501)
 
 /*
  * In-flight revocation trace (#175). The seed has subject 1 current with a
@@ -170,6 +177,7 @@
 #define LEANOS_COMPOSITE_COMMAND_REJECT_SEALED_HANDLE_BEFORE_RECEIPT UINT64_C(0x4701)
 #define LEANOS_COMPOSITE_COMMAND_USE_DELEGATED_SEND UINT64_C(0x4801)
 #define LEANOS_COMPOSITE_COMMAND_REJECT_DELEGATED_RECEIVE UINT64_C(0x4901)
+#define LEANOS_COMPOSITE_COMMAND_BOOT_TRANSFER_SWITCH_SUBJECT_TWO UINT64_C(0x4a01)
 
 /*
  * In-flight revocation commands. The offer (0x2001), receipt (0x2101), and
@@ -198,9 +206,17 @@
 #define LEANOS_COMPOSITE_REPLY_UNMAPPED_PAGE_REJECTED UINT64_C(0x310f01)
 #define LEANOS_COMPOSITE_REPLY_PAGE_PROTECTED UINT64_C(0x452e01)
 #define LEANOS_COMPOSITE_REPLY_PROTECT_AMPLIFICATION_REJECTED UINT64_C(0x462e01)
+#define LEANOS_COMPOSITE_REPLY_TRANSFER_OFFERED UINT64_C(0x200901)
+#define LEANOS_COMPOSITE_REPLY_TRANSFER_ACCEPTED UINT64_C(0x210a01)
 #define LEANOS_COMPOSITE_REPLY_SEALED_HANDLE_REJECTED UINT64_C(0x470901)
 #define LEANOS_COMPOSITE_REPLY_DELEGATED_SEND_ACCEPTED UINT64_C(0x482f01)
 #define LEANOS_COMPOSITE_REPLY_DELEGATED_RECEIVE_REJECTED UINT64_C(0x492f01)
+#define LEANOS_COMPOSITE_REPLY_BOOT_TRANSFER_OFFERED UINT64_C(0x205201)
+#define LEANOS_COMPOSITE_REPLY_BOOT_TRANSFER_SWITCHED UINT64_C(0x4a5301)
+#define LEANOS_COMPOSITE_REPLY_BOOT_TRANSFER_SEALED_HANDLE_REJECTED UINT64_C(0x475301)
+#define LEANOS_COMPOSITE_REPLY_BOOT_TRANSFER_ACCEPTED UINT64_C(0x215401)
+#define LEANOS_COMPOSITE_REPLY_BOOT_TRANSFER_DELEGATED_SEND UINT64_C(0x485501)
+#define LEANOS_COMPOSITE_REPLY_BOOT_TRANSFER_DELEGATED_RECEIVE_REJECTED UINT64_C(0x495501)
 
 /*
  * In-flight revocation replies. LINEAGE_REVOKED means the exact accepted
