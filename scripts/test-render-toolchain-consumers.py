@@ -19,7 +19,7 @@ with tempfile.TemporaryDirectory() as directory:
     shutil.copy2(ROOT / "scripts/workflow_yaml.py", fixture / "scripts")
     shutil.copy2(ROOT / "Containerfile.ci", fixture)
     shutil.copy2(ROOT / "docs/boot-image.md", fixture / "docs")
-    for name in ("ci.yml", "release.yml"):
+    for name in ("ci.yml", "release.yml", "pages.yml"):
         shutil.copy2(ROOT / ".github/workflows" / name, fixture / ".github/workflows")
     ci = fixture / ".github/workflows/ci.yml"
     digest = next(
@@ -125,5 +125,80 @@ with tempfile.TemporaryDirectory() as directory:
     )
     assert stale_documentation.returncode == 1
     assert "docs/boot-image.md" in stale_documentation.stderr
+
+    shutil.copy2(ROOT / "docs/boot-image.md", documentation)
+    pages = fixture / ".github/workflows/pages.yml"
+    pages.write_text(
+        pages.read_text().replace(
+            "      - name: Set up Node\n",
+            "      - name: Install mutable image tools\n"
+            "        run: sudo apt-get install -y gcc\n\n"
+            "      - name: Set up Node\n",
+            1,
+        )
+    )
+    mutable_pages = subprocess.run(
+        command + ["--check"], text=True, capture_output=True
+    )
+    assert mutable_pages.returncode == 1
+    assert "mutable apt command" in mutable_pages.stderr
+
+    shutil.copy2(ROOT / ".github/workflows/pages.yml", pages)
+    pages.write_text(pages.read_text().replace("    needs: build-image\n", "", 1))
+    detached_browser = subprocess.run(
+        command + ["--check"], text=True, capture_output=True
+    )
+    assert detached_browser.returncode == 1
+    assert "browser build must require" in detached_browser.stderr
+
+    shutil.copy2(ROOT / ".github/workflows/pages.yml", pages)
+    pages.write_text(
+        pages.read_text().replace(
+            '            "${{ github.sha }}"\n',
+            '            "0000000000000000000000000000000000000000"\n',
+            1,
+        )
+    )
+    unbound_bundle = subprocess.run(
+        command + ["--check"], text=True, capture_output=True
+    )
+    assert unbound_bundle.returncode == 1
+    assert "revision-bound image verification is missing" in unbound_bundle.stderr
+
+    shutil.copy2(ROOT / ".github/workflows/pages.yml", pages)
+    pages.write_text(pages.read_text().replace("            corpus.tsv \\\n", "", 1))
+    incomplete_bundle = subprocess.run(
+        command + ["--check"], text=True, capture_output=True
+    )
+    assert incomplete_bundle.returncode == 1
+    assert "browser image bundle omits corpus.tsv" in incomplete_bundle.stderr
+
+    shutil.copy2(ROOT / ".github/workflows/pages.yml", pages)
+    pages.write_text(
+        pages.read_text().replace(
+            "            build/ci/leanos-pages-image.tar.gz.sha256\n",
+            "            build/ci/wrong-image.tar.gz.sha256\n",
+            1,
+        )
+    )
+    wrong_upload_path = subprocess.run(
+        command + ["--check"], text=True, capture_output=True
+    )
+    assert wrong_upload_path.returncode == 1
+    assert "artifact upload path drifted" in wrong_upload_path.stderr
+
+    shutil.copy2(ROOT / ".github/workflows/pages.yml", pages)
+    pages.write_text(
+        pages.read_text().replace(
+            "          path: build/ci/pages-image\n",
+            "          path: build/ci/wrong-pages-image\n",
+            1,
+        )
+    )
+    wrong_download_path = subprocess.run(
+        command + ["--check"], text=True, capture_output=True
+    )
+    assert wrong_download_path.returncode == 1
+    assert "artifact download path drifted" in wrong_download_path.stderr
 
 print("Toolchain consumer render fixtures passed")
