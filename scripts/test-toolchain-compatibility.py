@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import copy
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import importlib.util
 import json
 from pathlib import Path
@@ -101,7 +103,8 @@ class CompatibilityTests(unittest.TestCase):
                      patch.object(compat, "environment", side_effect=(
                          compat.profiles.ProfileError("environment drift")
                          if failed_phase == "environment" else None)), \
-                     patch.object(compat.subprocess, "run", side_effect=execute) as runner:
+                     patch.object(compat.subprocess, "run", side_effect=execute) as runner, \
+                     redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                     with self.assertRaises(compat.profiles.ProfileError):
                         compat.run(self.data["default_profile"], output)
                 report = json.loads(output.read_text())
@@ -143,6 +146,55 @@ class CompatibilityTests(unittest.TestCase):
         entries = compat.profiles.check_manifest(data)
         self.assertEqual(entries["gcc-reference"], self.entries["gcc-reference"])
         self.assertEqual(entries["clang-candidate"]["shared_tools"]["xorriso"], new)
+
+    def test_environment_rejects_drift_before_building(self) -> None:
+        profile = self.entries[self.data["default_profile"]]
+        inventory = "\n".join(pin.replace("=", "\t", 1)
+                              for pin in self.data["canonical_apt_packages"])
+        outputs = ["x86_64", inventory, "Lean (version 4.32.0, release)"]
+        with patch.dict(compat.os.environ, {
+            "LEANOS_CI_IMAGE_DIGEST": profile["reference_environment"]["ci_image_digest"]
+        }), patch.object(compat.profiles, "compiler_version", return_value="gcc (Ubuntu) 13.3.0"):
+            with patch.object(compat, "checked_output", side_effect=outputs):
+                compat.environment(profile, self.data)
+            for index, replacement in ((0, "aarch64"), (1, "gcc\t0"),
+                                       (2, "Lean (version 4.33.0, release)")):
+                changed = list(outputs)
+                changed[index] = replacement
+                with self.subTest(component=index), \
+                     patch.object(compat, "checked_output", side_effect=changed), \
+                     self.assertRaises(compat.profiles.ProfileError):
+                    compat.environment(profile, self.data)
+        with patch.dict(compat.os.environ, {"LEANOS_CI_IMAGE_DIGEST": "sha256:" + "0" * 64}), \
+             self.assertRaisesRegex(compat.profiles.ProfileError, "digest"):
+            compat.environment(profile, self.data)
+
+    def test_workflow_is_observational_and_retains_failures(self) -> None:
+        from workflow_yaml import load_workflow
+
+        workflow = load_workflow(ROOT / ".github/workflows/toolchain-compatibility.yml")
+        self.assertEqual(workflow["permissions"], {"contents": "read"})
+        self.assertEqual(workflow["on"]["schedule"], [{"cron": "23 4 * * *"}])
+        self.assertIn("workflow_dispatch", workflow["on"])
+        self.assertIn("scripts/**", workflow["on"]["pull_request"]["paths"])
+        evidence = workflow["jobs"]["evidence"]
+        self.assertEqual(evidence["container"], "${{ matrix.image }}")
+        self.assertEqual(evidence["env"]["LEANOS_CI_IMAGE_DIGEST"], "${{ matrix.digest }}")
+        self.assertFalse(evidence["strategy"]["fail-fast"])
+        self.assertNotIn("continue-on-error", evidence)
+        upload = evidence["steps"][-1]
+        self.assertEqual(upload["if"], "always()")
+        self.assertEqual(upload["with"]["if-no-files-found"], "error")
+        comparison = workflow["jobs"]["compare"]
+        self.assertIn("always()", comparison["if"])
+        self.assertEqual(comparison["needs"], ["profiles", "evidence"])
+        for job in workflow["jobs"].values():
+            for step in job["steps"]:
+                if "uses" in step:
+                    self.assertRegex(step["uses"].split()[0], r"@[0-9a-f]{40}$")
+                self.assertNotIn("continue-on-error", step)
+        for path in (".github/workflows/ci.yml", "scripts/check.sh"):
+            self.assertIn("python3 scripts/test-toolchain-compatibility.py", (ROOT / path).read_text())
 
 
 if __name__ == "__main__":
