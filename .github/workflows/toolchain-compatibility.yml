@@ -15,6 +15,7 @@ on:
       - 'lean-toolchain'
       - 'lakefile.toml'
       - 'lake-manifest.json'
+      - 'Containerfile.ci'
 
 # This workflow is observational, not a release or required-admission input.
 # Failures remain red and retain diagnostics; do not turn them into success.

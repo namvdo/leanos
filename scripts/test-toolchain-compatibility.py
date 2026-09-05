@@ -115,6 +115,37 @@ class CompatibilityTests(unittest.TestCase):
                 self.assertIn("completed_at", report)
                 self.assertIn("error", report)
 
+    def test_success_enumerates_modules_and_propagates_profile(self) -> None:
+        profile = self.entries["clang-reference"]
+        guest = {"results": [{
+            "id": row["id"], "expected_result_class": row["result_class"],
+            "status": "PASS", "runner_exit_status": 0,
+        } for row in compat.expected_scenarios()]}
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            (directory / "LeanOS").mkdir()
+            (directory / "LeanOS/Unimported.lean").write_text("example : True := True.intro\n")
+            output = directory / "report.json"
+            with patch.object(compat, "ROOT", directory), \
+                 patch.object(compat, "registry", return_value=(self.data, self.entries)), \
+                 patch.object(compat, "checked_output", return_value=self.revision), \
+                 patch.object(compat, "environment"), \
+                 patch.object(compat, "semantic_contract", return_value=self.reports[0]["semantic"]), \
+                 patch.object(compat.profiles, "load_json", return_value=guest), \
+                 patch.object(compat.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as runner, \
+                 redirect_stdout(io.StringIO()):
+                compat.run(profile["id"], output)
+            report = json.loads(output.read_text())
+            self.assertEqual(report["status"], "PASS")
+            self.assertEqual(report["phases"], list(compat.PHASES))
+            proof_command = runner.call_args_list[1].args[0]
+            self.assertIn("LeanOS.Unimported", proof_command)
+            for call in runner.call_args_list:
+                env = call.kwargs["env"]
+                self.assertEqual(env["LEANOS_CC"], "clang-18")
+                self.assertEqual(env["LEANOS_HOST_CC"], "clang-18")
+                self.assertEqual(env["LEANOS_ELF_LAYOUT_PROFILE"], "clang18-v1")
+
     def test_registry_rejects_unknown_tier_borrowed_layout_and_duplicate_keys(self) -> None:
         for key, value in (("evidence_tier", "latest"), ("apt_packages", ["binutils=1"]),
                            ("lean_toolchain", "leanprover/lean4:nightly")):
